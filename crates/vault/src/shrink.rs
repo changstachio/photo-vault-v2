@@ -206,19 +206,41 @@ pub fn run(cfg: &Config, ctx: &Ctx) -> Result<()> {
     Ok(())
 }
 
+/// Re-encoded JPG to use instead of `data`, if any: when it is at least `min` % smaller, or always
+/// when `data` itself is broken (decoders disagree). Returns (bytes, pixel size) and whether
+/// `data` was broken.
+pub(crate) fn shrink_bytes(data: &[u8], q: u8, ch: Chroma, min: f32) -> Option<((Vec<u8>, (u16, u16)), bool)> {
+    let broken = vault_raw::subsampled_baseline(data) && vault_raw::decoders_disagree(data).unwrap_or(false);
+    let limit = data.len() as f64 * (1.0 - min as f64 / 100.0);
+    match recompress(data, q, ch) {
+        Ok((b, w, h)) if broken || (b.len() as f64) <= limit => Some(((b, (w, h)), broken)),
+        Ok(_) => None,
+        // A broken file that cannot be re-encoded is repaired losslessly if jpegtran is installed.
+        Err(_) if broken => crate::repair::fix(data).ok().flatten().and_then(|b| vault_raw::probe_decode_bytes(&b).ok().map(|i| ((b, (i.width as u16, i.height as u16)), true))),
+        Err(_) => None,
+    }
+}
+
 fn shrink_zip(cfg: &Config, ctx: &Ctx, pool: &rayon::ThreadPool, path: &Path) -> Result<u64> {
     let (q, ch, min) = (cfg.archive.render.quality, cfg.archive.render.chroma, cfg.archive.shrink_min_saving_percent);
     let fname = path.file_name().unwrap().to_string_lossy().into_owned();
-    let f = move |data: &[u8]| -> Option<(Vec<u8>, (u16, u16))> {
-        let limit = data.len() as f64 * (1.0 - min as f64 / 100.0);
-        recompress(data, q, ch).ok().filter(|(b, _, _)| (b.len() as f64) <= limit).map(|(b, w, h)| (b, (w, h)))
+    let fixed = std::sync::atomic::AtomicUsize::new(0);
+    let f = |data: &[u8]| -> Option<(Vec<u8>, (u16, u16))> {
+        let (new, was_broken) = shrink_bytes(data, q, ch, min)?;
+        if was_broken {
+            fixed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        Some(new)
     };
     let pct = |r: &Rewrite| 100.0 * r.orig_len.saturating_sub(r.new_len) as f64 / r.orig_len.max(1) as f64;
-    let accept = |r: &Rewrite| r.new_len < r.orig_len && pct(r) >= min as f64;
+    // Broken JPGs (shown as green stripes by some viewers) are always replaced, even if bigger.
+    let accept = |r: &Rewrite| fixed.load(std::sync::atomic::Ordering::Relaxed) > 0 || (r.new_len < r.orig_len && pct(r) >= min as f64);
     let r = rewrite_zip(ctx, pool, cfg.archive.threads * 2, path, &f, &accept)?;
+    let nfixed = fixed.load(std::sync::atomic::Ordering::Relaxed);
     if r.changed > 0 && accept(&r) {
-        ctx.log(format!("{fname}: {} -> {} ({:.0}% smaller)", fmt_bytes(r.orig_len), fmt_bytes(r.new_len), pct(&r)));
-        Ok(r.orig_len - r.new_len)
+        let extra = if nfixed > 0 { format!(", {nfixed} broken JPG(s) replaced") } else { String::new() };
+        ctx.log(format!("{fname}: {} -> {} ({:.0}% smaller{extra})", fmt_bytes(r.orig_len), fmt_bytes(r.new_len), pct(&r)));
+        Ok(r.orig_len.saturating_sub(r.new_len))
     } else {
         ctx.log(format!("{fname}: {} -> {} ({:.1}% smaller), below {min}%: left unchanged", fmt_bytes(r.orig_len), fmt_bytes(r.new_len), pct(&r)));
         Ok(0)
@@ -254,10 +276,9 @@ fn shrink_dir(cfg: &Config, ctx: &Ctx, pool: &rayon::ThreadPool, dir: &Path) -> 
 fn shrink_file(f: &FileInfo, q: u8, ch: Chroma, min: f32) -> Result<(u64, u64)> {
     let data = fs::read(&f.abs)?;
     let old = data.len() as u64;
-    let (b, w, h) = recompress(&data, q, ch)?;
-    if (b.len() as f64) > old as f64 * (1.0 - min as f64 / 100.0) {
+    let Some(((b, (w, h)), _)) = shrink_bytes(&data, q, ch, min) else {
         return Ok((old, old));
-    }
+    };
     let info = vault_raw::probe_decode_bytes(&b)?;
     if info.width != w as u32 || info.height != h as u32 {
         bail!("re-encoded JPG has the wrong size");

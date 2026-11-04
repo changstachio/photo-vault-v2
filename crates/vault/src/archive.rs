@@ -137,6 +137,10 @@ fn convert_one(cfg: &Config, ctx: &Ctx, f: &FileInfo) -> Result<(u64, u64)> {
     let a = &cfg.archive;
     let mode = ctx.existing.lock().unwrap().unwrap_or(a.existing_jpg);
     let existing = existing_jpg(f);
+    // An existing JPG that some viewers show as garbage (written by the old encoder) is not good
+    // enough to replace the ARW: it is converted again and overwritten instead.
+    let existing_broken = existing.as_ref().is_some_and(|j| fs::read(j).map(|d| vault_raw::subsampled_baseline(&d) && vault_raw::decoders_disagree(&d).unwrap_or(true)).unwrap_or(true));
+    let mode = if existing_broken { ExistingJpg::Overwrite } else { mode };
     if let (ExistingJpg::UseExisting, Some(j)) = (mode, &existing) {
         let info = vault_raw::probe_decode(j).with_context(|| format!("{} does not decode; ARW kept", j.display()))?;
         if info.width == 0 || info.height == 0 {

@@ -32,10 +32,10 @@ fn jpegtran(data: &[u8]) -> Result<Vec<u8>> {
     Ok(out.stdout)
 }
 
-/// `Some(repaired bytes)` if `data` is a JPG that the two decoders disagree on and jpegtran fixes
+/// `Some(repaired bytes)` if `data` is a JPG that the decoders disagree on and jpegtran fixes
 /// it losslessly (pixels identical in the reference decoder, and both decoders now agree).
 pub fn fix(data: &[u8]) -> Result<Option<Vec<u8>>> {
-    if !vault_raw::vertically_subsampled_baseline(data) || !vault_raw::decoders_disagree(data)? {
+    if !vault_raw::subsampled_baseline(data) || !vault_raw::decoders_disagree(data)? {
         return Ok(None);
     }
     let new = jpegtran(data)?;
@@ -49,7 +49,7 @@ pub fn fix(data: &[u8]) -> Result<Option<Vec<u8>>> {
 }
 
 fn broken(data: &[u8]) -> bool {
-    vault_raw::vertically_subsampled_baseline(data) && vault_raw::decoders_disagree(data).unwrap_or(false)
+    vault_raw::subsampled_baseline(data) && vault_raw::decoders_disagree(data).unwrap_or(false)
 }
 
 /// Task 6: find JPGs (loose or inside zips) under the local backup that some image viewers show as

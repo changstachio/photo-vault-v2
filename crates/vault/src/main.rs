@@ -48,12 +48,44 @@ enum Cmd {
     Repair { #[arg(long)] dry_run: bool },
     /// 4: report (or with --apply, fix) projects sitting in the wrong year folder
     Dates { #[arg(long)] apply: bool },
+    /// Show how each JPEG decoder reads the given files (diagnoses green/striped pictures)
+    Inspect { files: Vec<PathBuf> },
     /// Run the scheduler and web UI (for systemd)
     Daemon,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Cmd::Inspect { files } = &cli.cmd {
+        let mut bad = 0;
+        for f in files {
+            let data = std::fs::read(f).with_context(|| format!("reading {}", f.display()))?;
+            println!("{}  ({} bytes)", f.display(), data.len());
+            let mut worst = 0.0f64;
+            let mut failed = false;
+            for (name, r) in vault_raw::decoder_report(&data) {
+                match r {
+                    Ok(e) => {
+                        worst = worst.max(e);
+                        println!("  {name:<28} mean difference {e:.1}");
+                    }
+                    Err(e) => {
+                        failed = true;
+                        println!("  {name:<28} FAILED: {e}");
+                    }
+                }
+            }
+            let broken = failed || worst > 6.0;
+            if broken {
+                bad += 1;
+            }
+            println!("  -> {}", if broken { "BROKEN in some viewers (run task 6, Repair JPGs, or shrink it again)" } else { "OK in all decoders" });
+        }
+        if bad > 0 {
+            std::process::exit(2);
+        }
+        return Ok(());
+    }
     if let Cmd::Init { path } = &cli.cmd {
         let p = path.clone().or(cli.config.clone()).unwrap_or_else(|| "photovault.toml".into());
         if p.exists() {
@@ -67,7 +99,7 @@ fn main() -> Result<()> {
     let cfg = config::Config::load(&path)?;
     let cli_ctx = |dry, apply| job::Ctx::new(dry, apply, true);
     match cli.cmd {
-        Cmd::Init { .. } => unreachable!(),
+        Cmd::Init { .. } | Cmd::Inspect { .. } => unreachable!(),
         Cmd::Check => println!("{} is valid", path.display()),
         Cmd::Sync { dry_run } => app::run_task(&cfg, "sync", &cli_ctx(dry_run, false), None)?,
         Cmd::Ingest { dry_run } => app::run_task(&cfg, "ingest", &cli_ctx(dry_run, false), None)?,

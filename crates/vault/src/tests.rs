@@ -636,7 +636,7 @@ fn noisy_px(w: usize, h: usize) -> Vec<u8> {
 fn old_encoder_settings_are_detected_as_broken() {
     let px = noisy_px(640, 480);
     let bad = vault_raw::test_buggy_jpg(&px, 640, 480);
-    assert!(vault_raw::vertically_subsampled_baseline(&bad));
+    assert!(vault_raw::subsampled_baseline(&bad));
     assert!(vault_raw::decoders_disagree(&bad).unwrap(), "zune-jpeg should misread the old 4:2:0 output");
 }
 
@@ -763,3 +763,75 @@ fn web_host_check_blocks_dns_rebinding() {
     assert!(!host_allowed(Some("evil.example"), "0.0.0.0:8787", &mine));
     assert!(host_allowed(Some("192.168.1.5:8787"), "192.168.1.5:8787", &none));
 }
+
+#[test]
+fn optimised_422_is_caught_via_zune_04() {
+    // zune-jpeg 0.4 misreads these only for some content/sizes; this one reproduces it
+    let px = noisy_px(3000, 2000);
+    let bad = vault_raw::test_buggy_jpg_422(&px, 3000, 2000);
+    assert!(vault_raw::subsampled_baseline(&bad));
+    assert!(vault_raw::decoders_disagree(&bad).unwrap());
+}
+
+#[test]
+fn shrink_always_replaces_broken_jpgs_even_when_not_smaller() {
+    let t = tempfile::tempdir().unwrap();
+    let px = noisy_px(640, 480);
+    let bad = vault_raw::test_buggy_jpg(&px, 640, 480); // q90 4:2:0, old broken tables
+    // same settings as the broken file: the fixed version is not smaller, but must still replace it
+    let d = t.path().join("local/2016/Dir");
+    put(&d.join("a.jpg"), &bad, 2 * YEAR);
+    let mut c = shrink_cfg(t.path(), &d);
+    c.archive.render.quality = 90;
+    crate::shrink::run(&c, &Ctx::new(false, false, false)).unwrap();
+    let now = fs::read(d.join("a.jpg")).unwrap();
+    assert!(!vault_raw::decoders_disagree(&now).unwrap(), "loose file fixed by shrink");
+
+    let zp = t.path().join("local/2017/Z.zip");
+    fs::create_dir_all(zp.parent().unwrap()).unwrap();
+    let mut z = zip::ZipWriter::new(fs::File::create(&zp).unwrap());
+    z.start_file("Z/a.jpg", zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored)).unwrap();
+    std::io::Write::write_all(&mut z, &bad).unwrap();
+    z.finish().unwrap();
+    let mut c = shrink_cfg(t.path(), &zp);
+    c.archive.render.quality = 90;
+    crate::shrink::run(&c, &Ctx::new(false, false, false)).unwrap();
+    let mut z = zip::ZipArchive::new(fs::File::open(&zp).unwrap()).unwrap();
+    let mut b = Vec::new();
+    std::io::Read::read_to_end(&mut z.by_name("Z/a.jpg").unwrap(), &mut b).unwrap();
+    assert!(!vault_raw::decoders_disagree(&b).unwrap(), "zip entry fixed by shrink");
+}
+
+#[test]
+fn use_existing_does_not_trust_a_broken_jpg() {
+    let t = tempfile::tempdir().unwrap();
+    let mut c = cfg(t.path());
+    c.archive.existing_jpg = crate::config::ExistingJpg::UseExisting;
+    c.archive.default = crate::config::ArchiveMode::Convert;
+    let d = t.path().join("local/2014/P");
+    fs::create_dir_all(&d).unwrap();
+    fs::write(d.join("a.arw"), vault_raw::testdng::make(640, 480)).unwrap();
+    fs::write(d.join("a.jpg"), vault_raw::test_buggy_jpg(&noisy_px(640, 480), 640, 480)).unwrap();
+    crate::archive::run(&c, &Ctx::new(false, false, false), None).unwrap();
+    assert!(!d.join("a.arw").exists());
+    assert!(!vault_raw::decoders_disagree(&fs::read(d.join("a.jpg")).unwrap()).unwrap(), "re-converted, not kept");
+}
+
+#[test]
+fn every_chroma_setting_writes_jpgs_all_decoders_agree_on() {
+    let t = tempfile::tempdir().unwrap();
+    let dng = t.path().join("t.dng");
+    fs::write(&dng, vault_raw::testdng::make(1024, 768)).unwrap();
+    let px = noisy_px(1024, 768);
+    let src = vault_raw::test_buggy_jpg(&px, 1024, 768);
+    for q in [100u8, 90, 75, 50] {
+        for c in [vault_raw::Chroma::C420, vault_raw::Chroma::C422, vault_raw::Chroma::C444] {
+            let r = vault_raw::Render { quality: q, chroma: c, ..Default::default() };
+            let (_, j) = vault_raw::render_jpg(&dng, vault_raw::ColourMode::Preserve, 3, &r).unwrap();
+            assert!(!vault_raw::decoders_disagree(&j).unwrap(), "convert q{q} {c:?}");
+            let (s, _, _) = vault_raw::recompress::recompress(&src, q, c).unwrap();
+            assert!(!vault_raw::decoders_disagree(&s).unwrap(), "shrink q{q} {c:?}");
+        }
+    }
+}
+

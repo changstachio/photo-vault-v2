@@ -109,16 +109,16 @@ fn encode_rendered(r: &Rendered, quality: u8, chroma: Chroma) -> Result<Vec<u8>>
     Ok(jpg)
 }
 
-/// Chroma subsampling plus Huffman table choice. jpeg-encoder 0.7's optimised Huffman tables
-/// combined with vertically subsampled chroma (4:2:0) produce files that libjpeg reads correctly
-/// but zune-jpeg (used by many image viewers) decodes as garbage, so 4:2:0 uses the standard tables.
+/// Chroma subsampling plus Huffman tables. jpeg-encoder 0.7's optimised Huffman tables produce
+/// files that libjpeg reads correctly but zune-jpeg (used by many image viewers) decodes as green
+/// stripes: 0.5 breaks on 4:2:0, 0.4 also on 4:2:2. The standard tables are always used.
 pub(crate) fn set_sampling<W: jpeg_encoder::JfifWrite>(enc: &mut Encoder<W>, chroma: Chroma) {
     enc.set_sampling_factor(match chroma {
         Chroma::C444 => SamplingFactor::R_4_4_4,
         Chroma::C422 => SamplingFactor::R_4_2_2,
         Chroma::C420 => SamplingFactor::R_4_2_0,
     });
-    enc.set_optimized_huffman_tables(chroma != Chroma::C420);
+    enc.set_optimized_huffman_tables(false);
 }
 
 fn mean_abs_diff(a: &[u8], b: &[u8]) -> f64 {
@@ -135,36 +135,70 @@ fn zune_decode(jpg: &[u8]) -> Result<Vec<u8>> {
     d.decode().map_err(|e| anyhow::anyhow!("{e:?}"))
 }
 
+fn zune04_decode(jpg: &[u8]) -> Result<Vec<u8>> {
+    zune_jpeg_04::JpegDecoder::new(jpg).decode().map_err(|e| anyhow::anyhow!("{e:?}"))
+}
+
 fn ref_decode(jpg: &[u8]) -> Result<Vec<u8>> {
     let mut d = jpeg_decoder::Decoder::new(jpg);
     d.decode().map_err(|e| anyhow::anyhow!("{e}"))
 }
 
-/// Largest mean per-channel error accepted between a decoded JPG and the pixels it was made from.
-/// Normal JPEG loss is a few units even at low quality; a broken file is 50-120.
+/// Largest mean per-channel error accepted between the reference decode of a new JPG and the pixels
+/// it was made from (normal JPEG loss is a few units even at low quality).
 const MAX_MEAN_ERROR: f64 = 20.0;
+/// Largest mean difference allowed between two decoders reading the same file. Correct decoders
+/// differ by about 1-3 (rounding, chroma upsampling); the broken files differ by 25-120.
+const MAX_DECODER_GAP: f64 = 6.0;
 
-/// Decode `jpg` with two independent decoders (jpeg-decoder and zune-jpeg) and require both to
-/// match `src` (the pixels it was encoded from). Catches files that some viewers show wrongly.
+/// Decode `jpg` with jpeg-decoder (matches libjpeg) and zune-jpeg 0.5 and 0.4 (used by many image
+/// viewers). The reference decode must match `src`, the pixels the JPG was made from, and the
+/// other decoders must agree with it.
 pub fn verify_against(jpg: &[u8], src: &[u8]) -> Result<()> {
-    for (name, px) in [("jpeg-decoder", ref_decode(jpg)), ("zune-jpeg", zune_decode(jpg))] {
+    let r = ref_decode(jpg).context("jpeg-decoder cannot decode the new JPG")?;
+    if r.len() != src.len() {
+        bail!("new JPG decodes to {} bytes, expected {}", r.len(), src.len());
+    }
+    let e = mean_abs_diff(&r, src);
+    if e > MAX_MEAN_ERROR {
+        bail!("new JPG differs too much from its source (mean error {e:.1}); not written");
+    }
+    for (name, px) in [("zune-jpeg 0.5", zune_decode(jpg)), ("zune-jpeg 0.4", zune04_decode(jpg))] {
         let px = px.with_context(|| format!("{name} cannot decode the new JPG"))?;
-        if px.len() != src.len() {
-            bail!("{name} decodes the new JPG to {} bytes, expected {}", px.len(), src.len());
+        if px.len() != r.len() {
+            bail!("{name} decodes the new JPG to {} bytes, expected {}", px.len(), r.len());
         }
-        let e = mean_abs_diff(&px, src);
-        if e > MAX_MEAN_ERROR {
-            bail!("{name} decodes the new JPG wrongly (mean error {e:.1}); not written");
+        let g = mean_abs_diff(&px, &r);
+        if g > MAX_DECODER_GAP {
+            bail!("{name} shows the new JPG differently (mean difference {g:.1}); not written");
         }
     }
     Ok(())
 }
 
-/// True if the two decoders disagree on `jpg` (a file some viewers show as garbage).
+/// True if the decoders disagree on `jpg` (a file some viewers show as garbage). A decoder that
+/// fails outright counts as disagreeing; the reference decoder must succeed.
 pub fn decoders_disagree(jpg: &[u8]) -> Result<bool> {
     let a = ref_decode(jpg)?;
-    let b = zune_decode(jpg)?;
-    Ok(a.len() != b.len() || mean_abs_diff(&a, &b) > MAX_MEAN_ERROR)
+    for b in [zune_decode(jpg), zune04_decode(jpg)] {
+        match b {
+            Ok(b) if b.len() == a.len() && mean_abs_diff(&a, &b) <= MAX_DECODER_GAP => {}
+            _ => return Ok(true),
+        }
+    }
+    Ok(false)
+}
+
+/// Per-decoder report for one JPG: (decoder, Ok(mean error vs jpeg-decoder) or Err(message)).
+pub fn decoder_report(jpg: &[u8]) -> Vec<(&'static str, Result<f64, String>)> {
+    let a = ref_decode(jpg);
+    let mut out = vec![("jpeg-decoder (libjpeg-like)", a.as_ref().map(|_| 0.0).map_err(|e| e.to_string()))];
+    if let Ok(a) = &a {
+        for (n, b) in [("zune-jpeg 0.5", zune_decode(jpg)), ("zune-jpeg 0.4", zune04_decode(jpg))] {
+            out.push((n, b.map_err(|e| e.to_string()).and_then(|b| if b.len() == a.len() { Ok(mean_abs_diff(a, &b)) } else { Err(format!("{} bytes, expected {}", b.len(), a.len())) })));
+        }
+    }
+    out
 }
 
 /// Pixels as decoded by jpeg-decoder (matches libjpeg); used to prove a repair is lossless.
@@ -172,8 +206,8 @@ pub fn reference_pixels(jpg: &[u8]) -> Result<Vec<u8>> {
     ref_decode(jpg)
 }
 
-/// Baseline JPG whose chroma is subsampled vertically: the only kind the encoder bug produced.
-pub fn vertically_subsampled_baseline(j: &[u8]) -> bool {
+/// Baseline JPG with subsampled chroma (4:2:0, 4:2:2, ...): the only kinds the encoder bug affected.
+pub fn subsampled_baseline(j: &[u8]) -> bool {
     if j.len() < 4 || j[0] != 0xFF || j[1] != 0xD8 {
         return false;
     }
@@ -198,7 +232,7 @@ pub fn vertically_subsampled_baseline(j: &[u8]) -> bool {
                 return false;
             }
             let (hv_y, hv_cb) = (s[7], s[10]);
-            return (hv_y & 0x0F) > (hv_cb & 0x0F);
+            return hv_y != hv_cb;
         }
         i += 2 + len;
     }
@@ -290,6 +324,17 @@ pub fn test_buggy_jpg(px: &[u8], w: u16, h: u16) -> Vec<u8> {
     let mut b = Vec::new();
     let mut e = Encoder::new(&mut b, 90);
     e.set_sampling_factor(SamplingFactor::R_4_2_0);
+    e.set_optimized_huffman_tables(true); // the old, broken setting
+    e.encode(px, w, h, ColorType::Rgb).unwrap();
+    b
+}
+
+/// Test helper: 4:2:2 with optimised tables (broken only in zune-jpeg 0.4).
+#[doc(hidden)]
+pub fn test_buggy_jpg_422(px: &[u8], w: u16, h: u16) -> Vec<u8> {
+    let mut b = Vec::new();
+    let mut e = Encoder::new(&mut b, 90);
+    e.set_sampling_factor(SamplingFactor::R_4_2_2);
     e.set_optimized_huffman_tables(true);
     e.encode(px, w, h, ColorType::Rgb).unwrap();
     b

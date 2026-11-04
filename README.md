@@ -41,9 +41,11 @@ Set a folder, a year or a `.zip` to **shrink JPGs** in *Convert / zip selection*
 
 ## Task 6: repairing JPGs that show as green stripes
 
-Versions before this fix wrote 4:2:0 JPGs with optimised Huffman tables from jpeg-encoder 0.7. libjpeg-based programs show them correctly, but zune-jpeg, which many Rust-based image viewers use, decodes them as green/striped garbage. The pixel data is intact. `vault repair` (or button 6) checks every JPG under the local backup, including JPGs inside zips. It decodes each one with two decoders, and any file they disagree on is rewritten with `jpegtran -copy all -optimize`. That rewrite is lossless: the result must decode to identical pixels and both decoders must then agree, or the file is left alone. File times and metadata are kept. Needs `jpegtran`: `sudo apt install libjpeg-turbo-progs`. Use `--dry-run` to count affected files first.
+Versions before this fix wrote JPGs with jpeg-encoder 0.7's optimised Huffman tables. libjpeg-based programs show them correctly, but zune-jpeg, which many Rust-based image viewers use, decodes some of them as green/striped garbage: always for 4:2:0 in zune-jpeg 0.5, and for some 4:2:2 images in 0.4. The pixel data is intact. `vault repair` (or button 6) checks every JPG under the local backup, including JPGs inside zips. It decodes each one with two decoders, and any file they disagree on is rewritten with `jpegtran -copy all -optimize`. That rewrite is lossless: the result must decode to identical pixels and both decoders must then agree, or the file is left alone. File times and metadata are kept. Needs `jpegtran`: `sudo apt install libjpeg-turbo-progs`. Use `--dry-run` to count affected files first.
 
-Every JPG this tool writes is now checked with both decoders against its source pixels before it is kept or anything is deleted, and 4:2:0 uses standard Huffman tables (about 5% larger).
+Every JPG this tool writes now uses the standard Huffman tables (optimised tables also break 4:2:2 in zune-jpeg 0.4). Each one is checked before it is kept or anything is deleted: jpeg-decoder must match the source pixels, and zune-jpeg 0.5 and 0.4 must agree with jpeg-decoder. Shrink (task 5) always replaces a broken JPG it finds, even when the fixed one is not smaller. Convert (task 3) never keeps a broken existing JPG in place of an ARW. So running either task on affected folders fixes them without a separate repair.
+
+`vault inspect <file.jpg>...` prints how each decoder reads a file and whether it is broken (exit code 2 if any file is).
 
 ## Choosing what task 3 touches
 
