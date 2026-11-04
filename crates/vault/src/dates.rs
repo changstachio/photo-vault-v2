@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 use chrono::{Datelike, Local, NaiveDateTime, TimeZone};
 use rayon::prelude::*;
 use std::fs::{self, File};
@@ -103,20 +103,29 @@ fn is_zip_name(n: &str) -> bool {
 }
 
 /// Projects in a backup root: `<root>/<year>/<project>[.zip]` and unsorted `<root>/<project>[.zip]`.
-pub fn units(root: &Path) -> Result<Vec<Unit>> {
+/// Projects in a backup root (see above). An unreadable year folder is reported in the error list instead of
+/// stopping the whole scan.
+pub fn units_lossy(root: &Path) -> Result<(Vec<Unit>, Vec<String>)> {
     let mut v = Vec::new();
-    for e in fs::read_dir(root)? {
-        let e = e?;
+    let mut errs = Vec::new();
+    for e in fs::read_dir(root).with_context(|| format!("reading {}", root.display()))? {
+        let Ok(e) = e else { continue };
         let name = e.file_name().to_string_lossy().into_owned();
-        let ft = e.file_type()?;
+        let Ok(ft) = e.file_type() else { continue };
         if name.starts_with('.') || ft.is_symlink() {
             continue;
         }
         if ft.is_dir() && is_year(&name) {
-            for c in fs::read_dir(e.path())? {
-                let c = c?;
+            let rd = match fs::read_dir(e.path()) {
+                Ok(rd) => rd,
+                Err(err) => {
+                    errs.push(format!("cannot read {}: {err}", e.path().display()));
+                    continue;
+                }
+            };
+            for c in rd.filter_map(|c| c.ok()) {
                 let cn = c.file_name().to_string_lossy().into_owned();
-                let cft = c.file_type()?;
+                let Ok(cft) = c.file_type() else { continue };
                 if cn.starts_with('.') || cft.is_symlink() {
                     continue;
                 }
@@ -129,7 +138,7 @@ pub fn units(root: &Path) -> Result<Vec<Unit>> {
         }
     }
     v.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(v)
+    Ok((v, errs))
 }
 
 pub fn unit_date(u: &Unit) -> Result<Option<i64>> {
@@ -144,13 +153,18 @@ pub fn unit_date(u: &Unit) -> Result<Option<i64>> {
 /// with `apply`, move) projects that are not in the right `<year>` folder.
 pub fn run(cfg: &Config, ctx: &Ctx) -> Result<()> {
     let mut wrong = 0u64;
+    let mut problems = 0u64;
     let mut unknown = 0u64;
     for (label, root) in [("network", &cfg.paths.network_backup), ("local", &cfg.paths.local_backup)] {
         if !root.is_dir() {
             ctx.log(format!("{label}: {} not found, skipped", root.display()));
             continue;
         }
-        let us = units(root)?;
+        let (us, errs) = units_lossy(root)?;
+        for e in &errs {
+            problems += 1;
+            ctx.log(format!("{label}: {e}"));
+        }
         ctx.log(format!("{label}: {} project(s) in {}", us.len(), root.display()));
         ctx.reset_progress(us.len() as u64, 0);
         for u in us {
@@ -158,7 +172,14 @@ pub fn run(cfg: &Config, ctx: &Ctx) -> Result<()> {
                 ctx.log("cancelled");
                 return Ok(());
             }
-            let d = unit_date(&u)?;
+            let d = match unit_date(&u) {
+                Ok(d) => d,
+                Err(e) => {
+                    problems += 1;
+                    ctx.log(format!("{label}: {} could not be read: {e:#}", u.name));
+                    continue;
+                }
+            };
             ctx.add_file();
             let Some(ts) = d else {
                 unknown += 1;
@@ -191,5 +212,8 @@ pub fn run(cfg: &Config, ctx: &Ctx) -> Result<()> {
         }
     }
     ctx.log(format!("{wrong} project(s) in the wrong year folder, {unknown} without a usable date{}", if ctx.apply && !ctx.dry { "" } else { " (report only; run with apply to move)" }));
+    if problems > 0 {
+        bail!("{problems} folder(s) could not be read, see log");
+    }
     Ok(())
 }

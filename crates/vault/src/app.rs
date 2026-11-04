@@ -207,10 +207,12 @@ impl App {
         let task = task.to_string();
         std::thread::spawn(move || {
             ctx.log(format!("start {task}{}", if dry { " (dry run)" } else { "" }));
-            let r = run_task(&app.cfg(), &task, &ctx, None);
+            // A panic must not leave the runner marked busy forever.
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_task(&app.cfg(), &task, &ctx, None)));
             let msg = match r {
-                Ok(()) => "ok".to_string(),
-                Err(e) => format!("failed: {e:#}"),
+                Ok(Ok(())) => "ok".to_string(),
+                Ok(Err(e)) => format!("failed: {e:#}"),
+                Err(_) => "failed: internal error (panic); see the service log".to_string(),
             };
             ctx.log(format!("end {task}: {msg}"));
             if let Some(j) = app.job.lock().unwrap().as_mut() {
@@ -258,23 +260,12 @@ impl App {
 }
 
 /// Fires configured schedule entries (local time, minute resolution) and `run_on_start` tasks.
+/// A task that comes due while another one runs is queued and started as soon as the runner is
+/// free (the same task is never queued twice).
 pub fn scheduler(app: Arc<App>) {
-    for t in app.cfg().daemon.run_on_start.clone() {
-        // Start-up tasks queue behind each other.
-        while app.start(&t, false, false, None).is_err() {
-            std::thread::sleep(std::time::Duration::from_secs(5));
-        }
-        app.events.log(format!("started {t} on daemon start"));
-        loop {
-            std::thread::sleep(std::time::Duration::from_secs(2));
-            if !app.job.lock().unwrap().as_ref().map(|r| !r.done).unwrap_or(false) {
-                break;
-            }
-        }
-    }
+    let mut queue: std::collections::VecDeque<String> = app.cfg().daemon.run_on_start.iter().cloned().collect();
     let mut fired: HashMap<usize, String> = HashMap::new();
     loop {
-        std::thread::sleep(std::time::Duration::from_secs(10));
         let now = Local::now();
         let key = now.format("%Y-%m-%d %H:%M").to_string();
         let cfg = app.cfg();
@@ -287,10 +278,23 @@ pub fn scheduler(app: Arc<App>) {
                 continue;
             }
             fired.insert(i, key.clone());
-            match app.start(&s.task, false, false, None) {
-                Ok(()) => app.events.log(format!("scheduled {} started", s.task)),
-                Err(e) => app.events.log(format!("scheduled {} not started: {e}", s.task)),
+            if queue.contains(&s.task) {
+                continue;
+            }
+            queue.push_back(s.task.clone());
+        }
+        let busy = app.job.lock().unwrap().as_ref().map(|r| !r.done).unwrap_or(false);
+        if !busy {
+            if let Some(t) = queue.pop_front() {
+                match app.start(&t, false, false, None) {
+                    Ok(()) => app.events.log(format!("scheduled {t} started")),
+                    Err(e) => {
+                        app.events.log(format!("scheduled {t} waiting: {e}"));
+                        queue.push_front(t);
+                    }
+                }
             }
         }
+        std::thread::sleep(std::time::Duration::from_secs(10));
     }
 }

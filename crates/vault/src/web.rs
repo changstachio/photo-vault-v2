@@ -20,23 +20,66 @@ fn read_body(req: &mut tiny_http::Request) -> Option<String> {
     (r.is_ok() && body.len() <= 256 * 1024).then_some(body)
 }
 
+/// Host name part of a `Host` header (`name`, `name:port`, `[v6]:port`), lower-cased.
+fn host_name(h: &str) -> String {
+    let h = h.trim();
+    let name = if let Some(rest) = h.strip_prefix('[') { rest.split(']').next().unwrap_or("") } else { h.rsplit_once(':').map(|(n, p)| if p.chars().all(|c| c.is_ascii_digit()) { n } else { h }).unwrap_or(h) };
+    name.to_ascii_lowercase()
+}
+
+/// Blocks DNS rebinding: a hostile web page that points its own name at this machine can send
+/// same-origin requests (custom headers included), but its Host header still carries that name.
+/// Allowed: localhost names, the bind address, and `web.allowed_hosts`. When bound to all
+/// interfaces with no `allowed_hosts`, any Host is accepted (the UI is exposed anyway).
+pub fn host_allowed(host: Option<&str>, bind: &str, allowed: &[String]) -> bool {
+    let Some(host) = host else { return false };
+    let name = host_name(host);
+    if ["localhost", "127.0.0.1", "::1"].contains(&name.as_str()) || allowed.iter().any(|a| a.eq_ignore_ascii_case(&name)) {
+        return true;
+    }
+    let bind_host = host_name(bind);
+    if bind_host == name {
+        return true;
+    }
+    matches!(bind_host.as_str(), "0.0.0.0" | "::" | "") && allowed.is_empty()
+}
+
+static PREVIEW_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Minimal control page and JSON API. No login: bind to localhost or put it behind a proxy.
-/// POSTs need an `X-Vault` header, which a cross-site page cannot send without a CORS preflight.
+/// POSTs need an `X-Vault` header, which a cross-site page cannot send without a CORS preflight,
+/// and every request's Host header is checked against DNS rebinding.
 pub fn serve(app: Arc<App>) -> Result<()> {
     let bind = app.cfg().web.bind.clone();
     let server = Server::http(&bind).map_err(|e| anyhow!("cannot listen on {bind}: {e}"))?;
     app.events.log(format!("web UI on http://{bind}/"));
+    if matches!(host_name(&bind).as_str(), "0.0.0.0" | "::") && app.cfg().web.allowed_hosts.is_empty() {
+        app.events.log("listening on all interfaces with no web.allowed_hosts: any Host header is accepted; set allowed_hosts to this machine's name/IP");
+    }
     for mut req in server.incoming_requests() {
+        let host = req.headers().iter().find(|h| h.field.equiv("Host")).map(|h| h.value.as_str().to_string());
+        if !host_allowed(host.as_deref(), &bind, &app.cfg().web.allowed_hosts) {
+            let _ = req.respond(json(serde_json::json!({"error": "Host not allowed; add it to web.allowed_hosts"}), 403));
+            continue;
+        }
         let url = req.url().to_string();
         let (path, q) = url.split_once('?').unwrap_or((&url, ""));
         if req.method() == &Method::Get && path == "/api/preview" {
-            // Slow (a LibRaw render): answered on its own thread so the page keeps updating.
+            // Slow (a LibRaw render): answered on its own thread so the page keeps updating, and
+            // only one at a time, since each render can use a lot of memory.
+            if PREVIEW_BUSY.swap(true, std::sync::atomic::Ordering::AcqRel) {
+                let _ = req.respond(json(serde_json::json!({"error": "a size test is already running"}), 429));
+                continue;
+            }
             let app = app.clone();
             let p = crate::util::url_decode(param(q, "path").unwrap_or(""));
             std::thread::spawn(move || {
-                let resp = match crate::preview::run(&app.cfg(), std::path::Path::new(&p)) {
-                    Ok(v) => json(v, 200),
-                    Err(e) => json(serde_json::json!({"error": format!("{e:#}")}), 400),
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::preview::run(&app.cfg(), std::path::Path::new(&p))));
+                PREVIEW_BUSY.store(false, std::sync::atomic::Ordering::Release);
+                let resp = match r {
+                    Ok(Ok(v)) => json(v, 200),
+                    Ok(Err(e)) => json(serde_json::json!({"error": format!("{e:#}")}), 400),
+                    Err(_) => json(serde_json::json!({"error": "size test crashed"}), 500),
                 };
                 let _ = req.respond(resp);
             });

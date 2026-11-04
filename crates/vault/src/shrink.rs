@@ -165,7 +165,11 @@ pub fn run(cfg: &Config, ctx: &Ctx) -> Result<()> {
     if !root.is_dir() {
         bail!("local backup folder {} not found", root.display());
     }
-    let units: Vec<_> = dates::units(root)?.into_iter().filter(|u| cfg.archive_mode(&u.path) == ArchiveMode::Shrink).collect();
+    let (units, unit_errs) = dates::units_lossy(root)?;
+    for e in &unit_errs {
+        ctx.log(e);
+    }
+    let units: Vec<_> = units.into_iter().filter(|u| cfg.archive_mode(&u.path) == ArchiveMode::Shrink).collect();
     let size_of = |u: &dates::Unit| if u.is_zip { fs::metadata(&u.path).map(|m| m.len()).unwrap_or(0) } else { list_files(&u.path).map(|f| f.iter().map(|x| x.size).sum()).unwrap_or(0) };
     let total: u64 = units.iter().map(size_of).sum();
     ctx.log(format!("{} project(s) selected for shrinking, {} (quality {}, chroma {})", units.len(), fmt_bytes(total), cfg.archive.render.quality, cfg.archive.render.chroma.as_str()));
@@ -174,7 +178,7 @@ pub fn run(cfg: &Config, ctx: &Ctx) -> Result<()> {
     }
     ctx.reset_progress(units.len() as u64, total);
     let pool = rayon::ThreadPoolBuilder::new().num_threads(cfg.archive.threads).build()?;
-    let (mut problems, mut saved) = (0u32, 0u64);
+    let (mut problems, mut saved) = (unit_errs.len() as u32, 0u64);
     for u in units {
         if ctx.cancelled() {
             ctx.log("cancelled");

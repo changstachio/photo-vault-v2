@@ -700,3 +700,66 @@ fn repair_fixes_broken_jpgs_losslessly_and_leaves_good_ones() {
     crate::repair::run(&c, &ctx).unwrap();
     assert!(ctx.lines().iter().any(|l| l.contains("0 broken JPG(s) found")));
 }
+
+#[test]
+fn config_rejects_overlapping_ingest_backup_and_sync_paths() {
+    let t = tempfile::tempdir().unwrap();
+    let good = cfg(t.path());
+    let mut c = good.clone();
+    c.paths.ingest = t.path().to_path_buf(); // contains local/
+    assert!(c.validate().unwrap_err().to_string().contains("overlap"));
+    let mut c = good.clone();
+    c.paths.ingest = t.path().join("local/2016/in");
+    assert!(c.validate().is_err());
+    let mut c = good.clone();
+    c.sync.sources[0].path = t.path().to_path_buf(); // contains share/
+    assert!(c.validate().unwrap_err().to_string().contains("copied into itself"));
+    assert!(crate::config::overlaps(Path::new("/a/b/../c"), Path::new("/a/c/d")));
+    assert!(!crate::config::overlaps(Path::new("/a/bc"), Path::new("/a/b")));
+}
+
+#[test]
+fn ingest_waits_while_files_are_copied_in_with_old_timestamps() {
+    let t = tempfile::tempdir().unwrap();
+    let mut c = cfg(t.path());
+    c.ingest.min_idle_minutes = 60;
+    // like `cp -p` / rsync: just written, but carrying a 3-year-old modification time
+    put(&t.path().join("ingest/Copying/a.arw"), b"x", 3 * YEAR);
+    crate::ingest::run(&c, &Ctx::new(false, false, false)).unwrap();
+    assert!(t.path().join("ingest/Copying/a.arw").exists());
+    assert!(!t.path().join("local").read_dir().unwrap().any(|_| true), "nothing copied yet");
+}
+
+#[test]
+fn sync_handles_overlapping_and_same_name_selections() {
+    let t = tempfile::tempdir().unwrap();
+    let mut c = cfg(t.path());
+    put(&t.path().join("ingest/P/a.jpg"), b"a", YEAR);
+    put(&t.path().join("ingest/x/Photos/1.jpg"), b"1", YEAR);
+    put(&t.path().join("ingest/y/Photos/2.jpg"), b"2", YEAR);
+    let src = |p: &str| crate::config::Source { path: t.path().join(p), label: None };
+    c.sync.sources = vec![src("ingest/P"), src("ingest/P/a.jpg"), src("ingest/x/Photos"), src("ingest/y/Photos")];
+    crate::sync::run(&c, &Ctx::new(false, false, false)).unwrap();
+    assert!(t.path().join("share/P/a.jpg").exists());
+    assert!(t.path().join("share/Photos/1.jpg").exists());
+    assert!(t.path().join("share/y - Photos/2.jpg").exists());
+    // a source that overlaps the destination is refused at run time too
+    let mut c2 = c.clone();
+    c2.sync.sources = vec![src("share")];
+    assert!(crate::sync::run(&c2, &Ctx::new(false, false, false)).is_err());
+}
+
+#[test]
+fn web_host_check_blocks_dns_rebinding() {
+    use crate::web::host_allowed;
+    let none: Vec<String> = vec![];
+    assert!(host_allowed(Some("127.0.0.1:8787"), "127.0.0.1:8787", &none));
+    assert!(host_allowed(Some("localhost:8787"), "127.0.0.1:8787", &none));
+    assert!(host_allowed(Some("[::1]:8787"), "127.0.0.1:8787", &none));
+    assert!(!host_allowed(Some("evil.example:8787"), "127.0.0.1:8787", &none));
+    assert!(!host_allowed(None, "127.0.0.1:8787", &none));
+    let mine = vec!["rm-ubt.local".to_string()];
+    assert!(host_allowed(Some("RM-Ubt.local:8787"), "0.0.0.0:8787", &mine));
+    assert!(!host_allowed(Some("evil.example"), "0.0.0.0:8787", &mine));
+    assert!(host_allowed(Some("192.168.1.5:8787"), "192.168.1.5:8787", &none));
+}

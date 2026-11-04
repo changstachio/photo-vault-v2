@@ -22,6 +22,9 @@ Linux photo backup tool in Rust. One binary, `vault`, with four jobs, a schedule
 | Folder is deleted only after the zip is re-read and every file's hash matches | `archive.rs` |
 | A project that exists only as a zip in the local backup is left alone by ingest | `ingest.rs` |
 | Sync refuses to run if `sync.require_mount` is not a mount point | `sync.rs` |
+| `paths.ingest` may not contain or sit inside a backup folder, and no sync source may overlap `sync.dest` (config is rejected) | `config.rs` |
+| Ingest waits until nothing under a project has changed (ctime) for `min_idle_minutes`, so folders still being copied in with preserved old timestamps are not touched | `ingest.rs` |
+| Scheduled tasks that come due while another task runs are queued, not dropped | `app.rs` |
 | Copies go to a temp file, then rename; source changes mid-copy fail the file | `util.rs` |
 
 ## JPG size
@@ -81,7 +84,7 @@ All configured paths must be absolute mount paths. A URL such as `smb://host/sha
 
 Settings can be edited in the web UI (Settings box at the bottom): the text is checked, written to the config file (comments kept) and used from the next task on. `web.bind` and `web.enabled` need a service restart. The service user must own the config file and its folder (`install.sh` does this).
 
-The web UI has no login, so anyone who can reach it can change paths and run the deleting jobs. Keep it on localhost, use an SSH tunnel, or put it behind an authenticating reverse proxy. POST requests need an `X-Vault` header.
+The web UI has no login, so anyone who can reach it can change paths and run the deleting jobs. Requests whose `Host` header is not localhost, the bind address or one of `web.allowed_hosts` are refused (protects against DNS rebinding from a malicious web page). If you bind to `0.0.0.0` to use it from another machine, list this machine's name/IP in `allowed_hosts`. Keep it on localhost, use an SSH tunnel, or put it behind an authenticating reverse proxy. POST requests need an `X-Vault` header.
 
 ## Performance
 

@@ -97,6 +97,14 @@ pub fn run(cfg: &Config, ctx: &Ctx) -> Result<()> {
     Ok(())
 }
 
+/// Time since the most recent change (ctime) of any file or folder under `dir`.
+fn newest_change_age(dir: &Path) -> Option<Duration> {
+    use std::os::unix::fs::MetadataExt;
+    let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).ok()?.as_secs() as i64;
+    let newest = walkdir::WalkDir::new(dir).follow_links(false).into_iter().filter_map(|e| e.ok()).filter_map(|e| e.metadata().ok()).map(|m| m.ctime().max(m.mtime())).max()?;
+    Some(Duration::from_secs(now.saturating_sub(newest).max(0) as u64))
+}
+
 enum Outcome {
     Cleared,
     Kept,
@@ -109,9 +117,12 @@ fn project(cfg: &Config, ctx: &Ctx, name: &str, path: &Path, idle: Duration) -> 
         ctx.log(format!("{name}: empty, left alone"));
         return Ok(Outcome::Kept);
     }
-    if let Some(newest) = files.iter().map(|f| f.mtime).max() {
-        if SystemTime::now().duration_since(newest).unwrap_or_default() < idle {
-            ctx.log(format!("{name}: modified in the last {} min, skipped", idle.as_secs() / 60));
+    // Copy tools (cp -p, rsync, file managers) keep the original modification time, so a folder that
+    // is still being copied in can look old. The change time (ctime) of every file and folder is
+    // always "now" while anything is written, so that decides whether the project is idle.
+    if let Some(age) = newest_change_age(path) {
+        if age < idle {
+            ctx.log(format!("{name}: changed in the last {} min (still being copied?), skipped", idle.as_secs() / 60));
             return Ok(Outcome::Kept);
         }
     }

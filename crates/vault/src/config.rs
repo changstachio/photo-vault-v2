@@ -164,11 +164,13 @@ pub struct Web {
     pub bind: String,
     /// Folders the file picker may show and select from. Empty = the ingest and local backup folders.
     pub browse_roots: Vec<PathBuf>,
+    /// Extra host names/IPs the UI may be reached by (besides localhost and the bind address).
+    pub allowed_hosts: Vec<String>,
 }
 
 impl Default for Web {
     fn default() -> Self {
-        Self { enabled: true, bind: "127.0.0.1:8787".into(), browse_roots: vec![] }
+        Self { enabled: true, bind: "127.0.0.1:8787".into(), browse_roots: vec![], allowed_hosts: vec![] }
     }
 }
 
@@ -273,6 +275,24 @@ impl Config {
                 bail!("sync.dest = {:?} is the filesystem root; point it at the folder on the share", d.to_string_lossy());
             }
         }
+        // Folders that must not overlap: ingest deletes what it has backed up, so a backup folder
+        // inside the ingest folder (or the other way round) would be copied into itself and deleted.
+        let pairs = [
+            ("paths.ingest", &self.paths.ingest, "paths.local_backup", &self.paths.local_backup),
+            ("paths.ingest", &self.paths.ingest, "paths.network_backup", &self.paths.network_backup),
+        ];
+        for (an, a, bn, b) in pairs {
+            if overlaps(a, b) {
+                bail!("{an} ({}) and {bn} ({}) overlap; they must be separate folders", a.display(), b.display());
+            }
+        }
+        if let Some(d) = &self.sync.dest {
+            for src in &self.sync.sources {
+                if overlaps(&src.path, d) {
+                    bail!("sync source {} and sync.dest {} overlap; the share would be copied into itself", src.path.display(), d.display());
+                }
+            }
+        }
         for r in &self.web.browse_roots {
             abs("web.browse_roots", r)?;
         }
@@ -314,6 +334,29 @@ impl Config {
         }
         Ok(())
     }
+}
+
+/// True if one path is the other or lies inside it (compared after resolving symlinks where the
+/// paths exist, and lexically otherwise).
+pub fn overlaps(a: &Path, b: &Path) -> bool {
+    let norm = |p: &Path| -> PathBuf {
+        if let Ok(c) = p.canonicalize() {
+            return c;
+        }
+        let mut out = PathBuf::new();
+        for comp in p.components() {
+            match comp {
+                std::path::Component::ParentDir => {
+                    out.pop();
+                }
+                std::path::Component::CurDir => {}
+                c => out.push(c),
+            }
+        }
+        out
+    };
+    let (a, b) = (norm(a), norm(b));
+    a.starts_with(&b) || b.starts_with(&a)
 }
 
 pub fn default_path() -> PathBuf {
@@ -366,6 +409,7 @@ chroma = "420"                              # 420 (smallest) | 422 | 444 (larges
 [web]
 enabled = true
 bind = "127.0.0.1:8787"                     # no login; keep on localhost or behind a reverse proxy
+allowed_hosts = []                          # other names/IPs used to open the UI, e.g. ["rm-ubt.local"] when bind = "0.0.0.0:8787"
 browse_roots = []                           # folders the picker may show; empty = ingest + local_backup. e.g. ["/mnt/ssd", "/home/me/Pictures"]
 
 [daemon]

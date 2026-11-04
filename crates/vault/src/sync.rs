@@ -31,40 +31,68 @@ pub fn run(cfg: &Config, ctx: &Ctx) -> Result<()> {
 
     let mut items = Vec::new();
     let mut seen = 0u64;
-    let mut labels = std::collections::HashSet::new();
-    let mut files_labels = std::collections::HashSet::new();
+    let mut labels: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
     let mut errors = 0u64;
+    // A source inside another selected folder is already covered by it.
+    let folders: Vec<PathBuf> = s.sources.iter().filter(|x| x.path.is_dir()).map(|x| x.path.canonicalize().unwrap_or_else(|_| x.path.clone())).collect();
     for src in &s.sources {
+        let canon = src.path.canonicalize().unwrap_or_else(|_| src.path.clone());
+        if folders.iter().any(|f| *f != canon && canon.starts_with(f)) {
+            continue;
+        }
+        if crate::config::overlaps(&src.path, &dest) {
+            ctx.log(format!("skip {}: overlaps the destination {}", src.path.display(), dest.display()));
+            errors += 1;
+            continue;
+        }
         let is_file = src.path.is_file();
-        // A single selected file goes under its folder's name; a folder under its own name.
-        let default_label = if is_file { src.path.parent().and_then(|p| p.file_name()) } else { src.path.file_name() };
-        let label = src.label.clone().or_else(|| default_label.map(|n| n.to_string_lossy().into_owned())).unwrap_or_default();
-        if !is_plain_name(&label) {
-            ctx.log(format!("skip {}: cannot derive a folder name, set label", src.path.display()));
-            errors += 1;
-            continue;
-        }
-        // Several single files may share one folder label; folders may not.
-        if !labels.insert(label.clone()) && !(is_file && files_labels.contains(&label)) {
-            ctx.log(format!("skip {}: duplicate label {label}", src.path.display()));
-            errors += 1;
-            continue;
-        }
-        if is_file {
-            files_labels.insert(label.clone());
-        }
         if !src.path.is_dir() && !is_file {
             ctx.log(format!("skip {}: not found", src.path.display()));
             errors += 1;
             continue;
         }
-        let files = match if is_file { single_file(&src.path) } else { list_files(&src.path) } {
-            Ok(f) => f,
-            Err(e) => {
-                ctx.log(format!("scan failed {}: {e:#}", src.path.display()));
-                errors += 1;
-                continue;
+        // A single selected file goes under its folder's name; a folder under its own name.
+        let parent_dir = if is_file { src.path.parent().map(|p| p.to_path_buf()) } else { Some(src.path.clone()) };
+        let default_label = parent_dir.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned());
+        let mut label = src.label.clone().or(default_label).unwrap_or_default();
+        if !is_plain_name(&label) {
+            ctx.log(format!("skip {}: cannot derive a folder name, set label", src.path.display()));
+            errors += 1;
+            continue;
+        }
+        // Single files from the same folder share its label. Two different folders with the same
+        // name get the parent folder's name prefixed, e.g. "b - Photos", instead of mixing.
+        let owner = parent_dir.clone().unwrap_or_default();
+        if let Some(prev) = labels.get(&label) {
+            if *prev != owner {
+                let pre = owner.parent().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let alt = format!("{pre} - {label}");
+                if src.label.is_some() || !is_plain_name(&alt) || labels.get(&alt).is_some_and(|p| *p != owner) {
+                    ctx.log(format!("skip {}: folder name {label} is already used by {}; set a label", src.path.display(), prev.display()));
+                    errors += 1;
+                    continue;
+                }
+                ctx.log(format!("{}: {label} is taken, copying to {alt}", src.path.display()));
+                label = alt;
             }
+        }
+        labels.insert(label.clone(), owner);
+        let files = if is_file {
+            match single_file(&src.path) {
+                Ok(f) => f,
+                Err(e) => {
+                    ctx.log(format!("scan failed {}: {e:#}", src.path.display()));
+                    errors += 1;
+                    continue;
+                }
+            }
+        } else {
+            let (f, errs) = list_files_lossy(&src.path);
+            for e in errs.iter().take(20) {
+                ctx.log(format!("FAILED {e}"));
+            }
+            errors += errs.len() as u64;
+            f
         };
         let root = dest.join(&label);
         for f in files {
@@ -101,7 +129,13 @@ pub fn run(cfg: &Config, ctx: &Ctx) -> Result<()> {
                     let old = i.dst.with_file_name(format!(".{}.vold", i.dst.file_name().unwrap().to_string_lossy()));
                     let _ = std::fs::remove_file(&old);
                     std::fs::rename(&i.dst, &old)?;
-                    let res = copy_hashed(&i.f.abs, &i.dst, buf, ctx);
+                    let res = copy_hashed(&i.f.abs, &i.dst, buf, ctx).and_then(|(h, _)| {
+                        if s.verify && hash_file(&i.dst)? != h {
+                            let _ = std::fs::remove_file(&i.dst);
+                            bail!("verify failed for {}", i.dst.display());
+                        }
+                        Ok(())
+                    });
                     match res {
                         Ok(_) => {
                             let _ = std::fs::remove_file(&old);

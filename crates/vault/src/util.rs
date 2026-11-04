@@ -35,6 +35,33 @@ pub fn list_files(root: &Path) -> Result<Vec<FileInfo>> {
     Ok(v)
 }
 
+/// Like [`list_files`], but entries that cannot be read are returned as error messages instead of
+/// aborting the whole walk.
+pub fn list_files_lossy(root: &Path) -> (Vec<FileInfo>, Vec<String>) {
+    let (mut v, mut errs) = (Vec::new(), Vec::new());
+    for e in WalkDir::new(root).follow_links(false).sort_by_file_name() {
+        let e = match e {
+            Ok(e) => e,
+            Err(err) => {
+                errs.push(format!("cannot read {}: {err}", err.path().unwrap_or(root).display()));
+                continue;
+            }
+        };
+        if !e.file_type().is_file() {
+            continue;
+        }
+        let r = (|| -> Result<FileInfo> {
+            let md = e.metadata()?;
+            Ok(FileInfo { rel: e.path().strip_prefix(root)?.to_path_buf(), abs: e.path().to_path_buf(), size: md.len(), mtime: md.modified()? })
+        })();
+        match r {
+            Ok(f) => v.push(f),
+            Err(err) => errs.push(format!("cannot read {}: {err:#}", e.path().display())),
+        }
+    }
+    (v, errs)
+}
+
 pub fn is_plain_name(s: &str) -> bool {
     !s.is_empty() && s != "." && s != ".." && !s.contains(['/', '\\', '\0'])
 }
