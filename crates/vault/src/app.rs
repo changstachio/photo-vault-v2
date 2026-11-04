@@ -1,7 +1,8 @@
 use anyhow::{bail, Result};
 use chrono::{Datelike, Local, Timelike};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, RwLock};
 
 use crate::config::{parse_day, parse_hhmm, Config};
 use crate::job::Ctx;
@@ -14,7 +15,8 @@ pub struct Running {
 }
 
 pub struct App {
-    pub cfg: Config,
+    cfg: RwLock<Arc<Config>>,
+    pub cfg_path: PathBuf,
     pub job: Mutex<Option<Running>>,
     pub events: Arc<Ctx>,
 }
@@ -30,8 +32,43 @@ pub fn run_task(cfg: &Config, task: &str, ctx: &Ctx, limit: Option<usize>) -> Re
 }
 
 impl App {
-    pub fn new(cfg: Config) -> Arc<App> {
-        Arc::new(App { cfg, job: Mutex::new(None), events: Ctx::new(false, false, true) })
+    pub fn new(cfg: Config, cfg_path: PathBuf) -> Arc<App> {
+        Arc::new(App { cfg: RwLock::new(Arc::new(cfg)), cfg_path, job: Mutex::new(None), events: Ctx::new(false, false, true) })
+    }
+
+    pub fn cfg(&self) -> Arc<Config> {
+        self.cfg.read().unwrap().clone()
+    }
+
+    pub fn config_text(&self) -> Result<String> {
+        Ok(std::fs::read_to_string(&self.cfg_path)?)
+    }
+
+    /// Validate `text` as a config, write it to the config file (temp file + rename, so a failed
+    /// save never leaves a half-written file) and use it for the next task. Running tasks keep the
+    /// settings they started with. Returns a note when a restart is needed.
+    pub fn save_config(&self, text: &str) -> Result<Option<String>> {
+        let new: Config = toml::from_str(text).map_err(|e| anyhow::anyhow!("{e}"))?;
+        new.validate()?;
+        let old = self.cfg();
+        let n = self.cfg_path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let tmp = self.cfg_path.with_file_name(format!(".{n}.vtmp"));
+        let r = (|| -> Result<()> {
+            use std::io::Write;
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(text.as_bytes())?;
+            f.sync_all()?;
+            std::fs::rename(&tmp, &self.cfg_path)?;
+            Ok(())
+        })();
+        if let Err(e) = r {
+            let _ = std::fs::remove_file(&tmp);
+            bail!("cannot write {}: {e:#} (the service user needs write access to the file and its folder)", self.cfg_path.display());
+        }
+        let note = (old.web.bind != new.web.bind || old.web.enabled != new.web.enabled).then(|| "web.bind / web.enabled take effect after restarting the service".to_string());
+        *self.cfg.write().unwrap() = Arc::new(new);
+        self.events.log("config saved from web UI");
+        Ok(note)
     }
 
     /// Start a task in the background; one task at a time.
@@ -51,7 +88,7 @@ impl App {
         let task = task.to_string();
         std::thread::spawn(move || {
             ctx.log(format!("start {task}{}", if dry { " (dry run)" } else { "" }));
-            let r = run_task(&app.cfg, &task, &ctx, None);
+            let r = run_task(&app.cfg(), &task, &ctx, None);
             let msg = match r {
                 Ok(()) => "ok".to_string(),
                 Err(e) => format!("failed: {e:#}"),
@@ -96,14 +133,14 @@ impl App {
         serde_json::json!({
             "task": task, "running": running, "result": result, "log": log, "progress": prog,
             "events": self.events.lines(),
-            "schedule": self.cfg.schedule.iter().map(|s| format!("{} at {} {}", s.task, s.at, if s.days.is_empty() { "daily".into() } else { s.days.join(",") })).collect::<Vec<_>>(),
+            "schedule": self.cfg().schedule.iter().map(|s| format!("{} at {} {}", s.task, s.at, if s.days.is_empty() { "daily".into() } else { s.days.join(",") })).collect::<Vec<_>>(),
         })
     }
 }
 
 /// Fires configured schedule entries (local time, minute resolution) and `run_on_start` tasks.
 pub fn scheduler(app: Arc<App>) {
-    for t in app.cfg.daemon.run_on_start.clone() {
+    for t in app.cfg().daemon.run_on_start.clone() {
         // Start-up tasks queue behind each other.
         while app.start(&t, false, false, None).is_err() {
             std::thread::sleep(std::time::Duration::from_secs(5));
@@ -121,7 +158,8 @@ pub fn scheduler(app: Arc<App>) {
         std::thread::sleep(std::time::Duration::from_secs(10));
         let now = Local::now();
         let key = now.format("%Y-%m-%d %H:%M").to_string();
-        for (i, s) in app.cfg.schedule.iter().enumerate() {
+        let cfg = app.cfg();
+        for (i, s) in cfg.schedule.iter().enumerate() {
             let Ok((h, m)) = parse_hhmm(&s.at) else { continue };
             if now.hour() != h || now.minute() != m || fired.get(&i) == Some(&key) {
                 continue;

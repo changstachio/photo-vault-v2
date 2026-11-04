@@ -71,10 +71,10 @@ fn main() -> Result<()> {
         }
         Cmd::Dates { apply } => app::run_task(&cfg, "dates", &cli_ctx(false, apply), None)?,
         Cmd::Daemon => {
-            let a = app::App::new(cfg);
+            let a = app::App::new(cfg, path.clone());
             let s = a.clone();
             std::thread::spawn(move || app::scheduler(s));
-            if a.cfg.web.enabled {
+            if a.cfg().web.enabled {
                 web::serve(a).context("web server")?;
             } else {
                 loop {

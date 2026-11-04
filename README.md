@@ -51,7 +51,9 @@ sudo systemctl enable --now photovault
 
 The daemon starts at boot, runs the `[[schedule]]` entries (local time, `HH:MM`, optional `days`), can run tasks once at start (`daemon.run_on_start`), and serves the UI on `web.bind` (default `127.0.0.1:8787`). One task runs at a time. Mount the NAS yourself (`/etc/fstab`, CIFS or NFS); the tool stores no credentials. Needs a C++ compiler to build (LibRaw is vendored).
 
-The web UI has no login. Keep it on localhost, use an SSH tunnel, or put it behind an authenticating reverse proxy. POST requests need an `X-Vault` header.
+Settings can be edited in the web UI (Settings box at the bottom): the text is checked, written to the config file (comments kept) and used from the next task on. `web.bind` and `web.enabled` need a service restart. The service user must own the config file and its folder (`install.sh` does this).
+
+The web UI has no login, so anyone who can reach it can change paths and run the deleting jobs. Keep it on localhost, use an SSH tunnel, or put it behind an authenticating reverse proxy. POST requests need an `X-Vault` header.
 
 ## Performance
 

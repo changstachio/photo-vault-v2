@@ -257,3 +257,24 @@ fn existing_jpg_override_from_ctx_beats_config() {
     crate::archive::run(&c, &ctx, None).unwrap();
     assert!(!d.join("a.arw").exists() && !d.join("a_arw.jpg").exists());
 }
+
+#[test]
+fn save_config_validates_writes_and_applies() {
+    let t = tempfile::tempdir().unwrap();
+    let path = t.path().join("config.toml");
+    let good = crate::config::EXAMPLE.to_string();
+    fs::write(&path, &good).unwrap();
+    let app = crate::app::App::new(toml::from_str(&good).unwrap(), path.clone());
+    // invalid input is rejected and the file is untouched
+    assert!(app.save_config("[paths]\ningest = 1").is_err());
+    assert!(app.save_config(&good.replace("threads = 6", "threads = 0")).is_err());
+    assert!(app.save_config(&good.replace("task = \"sync\"", "task = \"nope\"")).is_err());
+    assert_eq!(fs::read_to_string(&path).unwrap(), good);
+    // valid change is written, applied, and flags a restart when the bind changes
+    let new = good.replace("threads = 6", "threads = 9").replace("127.0.0.1:8787", "127.0.0.1:9999");
+    let note = app.save_config(&new).unwrap();
+    assert!(note.is_some());
+    assert_eq!(app.cfg().sync.threads, 9);
+    assert_eq!(fs::read_to_string(&path).unwrap(), new);
+    assert!(!t.path().join(".config.toml.vtmp").exists());
+}
