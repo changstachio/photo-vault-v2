@@ -24,6 +24,10 @@ Linux photo backup tool in Rust. One binary, `vault`, with four jobs, a schedule
 | Sync refuses to run if `sync.require_mount` is not a mount point | `sync.rs` |
 | Copies go to a temp file, then rename; source changes mid-copy fail the file | `util.rs` |
 
+## Choosing what task 3 touches
+
+In the web UI's *Convert / zip selection*, open the local backup folders and set each year or project to **skip**, **convert** (ARW to JPG, no zip) or **convert + zip**. A choice on a year folder covers its projects; a choice on a project overrides it. Folders with no choice use `archive.default`, which is `none`: nothing is converted, zipped or deleted until you choose. Saved as `[[archive.rule]]` entries (`path`, `mode`) in the config file.
+
 ## ARW with a same-name JPG
 
 Set `archive.existing_jpg` in the config, pass `vault archive --existing-jpg <mode>`, or pick it in the web UI.
