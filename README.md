@@ -53,6 +53,10 @@ The daemon starts at boot, runs the `[[schedule]]` entries (local time, `HH:MM`,
 
 **Choosing what gets backed up:** the web UI's *Backup selection* box is a folder browser with checkboxes. Tick folders and/or individual files, then *Save selection*; the scheduled sync copies exactly those (files go under their folder's name on the share). The picker only shows `web.browse_roots` (default: the ingest and local backup folders) and refuses anything outside them, including `..` and symlink escapes. Saving rewrites only the `[[sync.source]]` entries and keeps the rest of the config file.
 
+If the picker is empty it lists why: usually the service user (`photovault`) cannot read the folder, e.g. a drive mounted under `/run/media/<you>/` or a home folder. Run the service as your own user (`User=` in `/etc/systemd/system/photovault.service`) or mount the drive somewhere readable.
+
+All configured paths must be absolute mount paths. A URL such as `smb://host/share` is not a path: mount the share (`/etc/fstab`) and use the mount point. `sync.dest` may not be `/`.
+
 Settings can be edited in the web UI (Settings box at the bottom): the text is checked, written to the config file (comments kept) and used from the next task on. `web.bind` and `web.enabled` need a service restart. The service user must own the config file and its folder (`install.sh` does this).
 
 The web UI has no login, so anyone who can reach it can change paths and run the deleting jobs. Keep it on localhost, use an SSH tunnel, or put it behind an authenticating reverse proxy. POST requests need an `X-Vault` header.

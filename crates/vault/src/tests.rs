@@ -335,3 +335,30 @@ fn url_decode_handles_percent_and_bad_input() {
     assert_eq!(crate::util::url_decode("100%"), "100%");
     assert_eq!(crate::util::url_decode("%zz%é"), "%zz%é");
 }
+
+#[test]
+fn config_rejects_urls_relative_paths_and_root_dest() {
+    let t = tempfile::tempdir().unwrap();
+    let good = cfg(t.path());
+    let mut c = good.clone();
+    c.paths.network_backup = "smb://10.0.0.8/share/x".into();
+    assert!(c.validate().unwrap_err().to_string().contains("absolute"));
+    let mut c = good.clone();
+    c.sync.dest = Some("/".into());
+    assert!(c.validate().unwrap_err().to_string().contains("root"));
+    let mut c = good.clone();
+    c.sync.sources[0].path = "relative/dir".into();
+    assert!(c.validate().is_err());
+}
+
+#[test]
+fn picker_reports_why_roots_are_unusable() {
+    let t = tempfile::tempdir().unwrap();
+    let mut c = cfg(t.path());
+    c.paths.ingest = t.path().join("missing");
+    c.paths.local_backup = t.path().join("missing2");
+    let app = crate::app::App::new(c, t.path().join("c.toml"));
+    let b = app.browse("").unwrap();
+    assert_eq!(b["entries"].as_array().unwrap().len(), 0);
+    assert_eq!(b["skipped"].as_array().unwrap().len(), 2);
+}

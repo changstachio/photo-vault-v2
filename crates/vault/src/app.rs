@@ -107,7 +107,8 @@ impl App {
         let cfg = self.cfg();
         let roots = cfg.browse_roots();
         if path.is_empty() {
-            return Ok(serde_json::json!({"path": "", "parent": null, "entries": roots.iter().map(|r| serde_json::json!({"name": r.to_string_lossy(), "path": r.to_string_lossy(), "dir": true, "size": 0})).collect::<Vec<_>>()}));
+            let skipped: Vec<_> = cfg.browse_root_status().into_iter().filter_map(|(p, why)| why.map(|w| serde_json::json!({"path": p.to_string_lossy(), "reason": w}))).collect();
+            return Ok(serde_json::json!({"path": "", "parent": null, "skipped": skipped, "entries": roots.iter().map(|r| serde_json::json!({"name": r.to_string_lossy(), "path": r.to_string_lossy(), "dir": true, "size": 0})).collect::<Vec<_>>()}));
         }
         let dir = cfg.pick_path(std::path::Path::new(path))?;
         let mut entries = Vec::new();

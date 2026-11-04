@@ -166,6 +166,21 @@ pub fn parse_day(s: &str) -> Result<chrono::Weekday> {
 }
 
 impl Config {
+    /// Why each configured picker folder is or is not usable (None = usable).
+    pub fn browse_root_status(&self) -> Vec<(PathBuf, Option<String>)> {
+        let list: Vec<&PathBuf> = if self.web.browse_roots.is_empty() { vec![&self.paths.ingest, &self.paths.local_backup] } else { self.web.browse_roots.iter().collect() };
+        list.into_iter()
+            .map(|p| {
+                let why = match std::fs::metadata(p) {
+                    Ok(m) if m.is_dir() => std::fs::read_dir(p).err().map(|e| format!("cannot be read by the service user ({e})")),
+                    Ok(_) => Some("is not a folder".to_string()),
+                    Err(e) => Some(format!("not accessible to the service user: {e}")),
+                };
+                (p.clone(), why)
+            })
+            .collect()
+    }
+
     /// Existing folders the web file picker may show, canonicalised.
     pub fn browse_roots(&self) -> Vec<PathBuf> {
         let list: Vec<&PathBuf> = if self.web.browse_roots.is_empty() { vec![&self.paths.ingest, &self.paths.local_backup] } else { self.web.browse_roots.iter().collect() };
@@ -190,6 +205,28 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        let abs = |what: &str, p: &Path| -> Result<()> {
+            let t = p.to_string_lossy();
+            if !p.is_absolute() {
+                bail!("{what} = {t:?} must be an absolute path to a mounted folder (not a URL like smb://...; mount the share first, e.g. with /etc/fstab or `gio mount`, and use the mount path)");
+            }
+            Ok(())
+        };
+        abs("paths.ingest", &self.paths.ingest)?;
+        abs("paths.local_backup", &self.paths.local_backup)?;
+        abs("paths.network_backup", &self.paths.network_backup)?;
+        if let Some(d) = &self.sync.dest {
+            abs("sync.dest", d)?;
+            if d.components().count() <= 1 {
+                bail!("sync.dest = {:?} is the filesystem root; point it at the folder on the share", d.to_string_lossy());
+            }
+        }
+        for r in &self.web.browse_roots {
+            abs("web.browse_roots", r)?;
+        }
+        for src in &self.sync.sources {
+            abs("sync.source path", &src.path)?;
+        }
         for s in &self.schedule {
             if !TASKS.contains(&s.task.as_str()) {
                 bail!("schedule: unknown task {:?}", s.task);

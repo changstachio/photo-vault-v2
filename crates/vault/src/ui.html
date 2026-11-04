@@ -75,18 +75,19 @@ async function loadCfg(){const r=await (await fetch("/api/config")).json();
 $("reload").onclick=loadCfg;
 $("save").onclick=async()=>{const r=await (await fetch("/api/config",{method:"POST",headers:{"X-Vault":"1"},body:$("cfg").value})).json();
  $("cmsg").className=r.error?"err":"";$("cmsg").textContent=r.error?r.error:("Saved and applied"+(r.note?". "+r.note:""));tick()};
-let sel=new Set(),cur="",parent=null,ents=[];
+let skipped=[],sel=new Set(),cur="",parent=null,ents=[];
 const esc=s=>s.replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 function drawSel(){$("selcount").textContent=sel.size+" selected";
  $("chosen").innerHTML=[...sel].sort().map(p=>`<label><input type="checkbox" checked data-p="${esc(p)}"> ${esc(p)}</label>`).join("")||"<label>Nothing selected</label>";
  $("chosen").querySelectorAll("input").forEach(i=>i.onchange=()=>{sel.delete(i.dataset.p);drawSel();drawList()})}
 function drawList(){$("here").textContent=cur||"(allowed folders)";$("up").disabled=cur===""&&parent===null;
- $("list").innerHTML=ents.map((e,i)=>`<label>${cur?`<input type="checkbox" data-i="${i}" ${sel.has(e.path)?"checked":""}>`:""}${e.dir?`<a data-d="${i}">&#128193; ${esc(e.name)}</a>`:`<span>${esc(e.name)}</span><span class="sz">${gb(e.size)}</span>`}</label>`).join("")||"<label>Empty</label>";
+ $("list").innerHTML=ents.map((e,i)=>`<label>${cur?`<input type="checkbox" data-i="${i}" ${sel.has(e.path)?"checked":""}>`:""}${e.dir?`<a data-d="${i}">&#128193; ${esc(e.name)}</a>`:`<span>${esc(e.name)}</span><span class="sz">${gb(e.size)}</span>`}</label>`).join("")||(cur===""?"<label class='err'>No folders available to pick from.</label>":"<label>Empty</label>");
+ if(cur==="")$("list").innerHTML+=skipped.map(s=>`<label class="err">${esc(s.path)}: ${esc(s.reason)}</label>`).join("")+(skipped.length?"<label>Fix: run the service as a user that can read these folders (User= in photovault.service), or set web.browse_roots in Settings below.</label>":"");
  $("list").querySelectorAll("input").forEach(x=>x.onchange=()=>{const p=ents[x.dataset.i].path;x.checked?sel.add(p):sel.delete(p);drawSel()});
  $("list").querySelectorAll("a").forEach(a=>a.onclick=ev=>{ev.preventDefault();browse(ents[a.dataset.d].path)})}
 async function browse(p){const r=await (await fetch("/api/browse?path="+encodeURIComponent(p))).json();
  if(r.error){$("selmsg").textContent=r.error;$("selmsg").className="err";return}
- $("selmsg").textContent="";$("selmsg").className="";cur=r.path;parent=r.parent;ents=r.entries;drawList()}
+ $("selmsg").textContent="";$("selmsg").className="";cur=r.path;parent=r.parent;ents=r.entries;skipped=r.skipped||[];drawList()}
 $("up").onclick=()=>browse(parent||"");
 $("all").onclick=()=>{ents.forEach(e=>sel.add(e.path));drawSel();drawList()};
 $("none").onclick=()=>{ents.forEach(e=>sel.delete(e.path));drawSel();drawList()};
