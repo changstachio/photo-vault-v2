@@ -71,6 +71,62 @@ impl App {
         Ok(note)
     }
 
+    /// Replace the `[[sync.source]]` list in the config file, keeping the rest of the file (comments
+    /// included) as it is. Every path must exist inside the allowed browse folders.
+    pub fn set_sources(&self, list: Vec<crate::config::Source>) -> Result<Option<String>> {
+        use toml_edit::{value, ArrayOfTables, DocumentMut, Item, Table};
+        let cfg = self.cfg();
+        let mut arr = ArrayOfTables::new();
+        let mut seen = std::collections::HashSet::new();
+        for s in &list {
+            let p = cfg.pick_path(&s.path)?;
+            if !seen.insert(p.clone()) {
+                continue;
+            }
+            let mut t = Table::new();
+            t["path"] = value(p.to_string_lossy().into_owned());
+            if let Some(l) = &s.label {
+                t["label"] = value(l.clone());
+            }
+            arr.push(t);
+        }
+        let mut doc: DocumentMut = self.config_text()?.parse().map_err(|e| anyhow::anyhow!("config file does not parse: {e}"))?;
+        if !doc.contains_key("sync") {
+            doc["sync"] = Item::Table(Table::new());
+        }
+        let sync = doc["sync"].as_table_mut().ok_or_else(|| anyhow::anyhow!("[sync] is not a table"))?;
+        sync.remove("source");
+        if !arr.is_empty() {
+            sync.insert("source", Item::ArrayOfTables(arr));
+        }
+        self.save_config(&doc.to_string())
+    }
+
+    /// One level of a folder for the picker. Empty `path` lists the allowed roots.
+    pub fn browse(&self, path: &str) -> Result<serde_json::Value> {
+        let cfg = self.cfg();
+        let roots = cfg.browse_roots();
+        if path.is_empty() {
+            return Ok(serde_json::json!({"path": "", "parent": null, "entries": roots.iter().map(|r| serde_json::json!({"name": r.to_string_lossy(), "path": r.to_string_lossy(), "dir": true, "size": 0})).collect::<Vec<_>>()}));
+        }
+        let dir = cfg.pick_path(std::path::Path::new(path))?;
+        let mut entries = Vec::new();
+        for e in std::fs::read_dir(&dir)? {
+            let e = e?;
+            let ft = e.file_type()?;
+            let name = e.file_name().to_string_lossy().into_owned();
+            if ft.is_symlink() || name.starts_with('.') || !(ft.is_dir() || ft.is_file()) {
+                continue;
+            }
+            let size = if ft.is_file() { e.metadata().map(|m| m.len()).unwrap_or(0) } else { 0 };
+            entries.push(serde_json::json!({"name": name, "path": e.path().to_string_lossy(), "dir": ft.is_dir(), "size": size}));
+        }
+        entries.sort_by(|a, b| (!a["dir"].as_bool().unwrap(), a["name"].as_str().unwrap().to_lowercase()).cmp(&(!b["dir"].as_bool().unwrap(), b["name"].as_str().unwrap().to_lowercase())));
+        entries.truncate(3000);
+        let parent = dir.parent().filter(|p| roots.iter().any(|r| p.starts_with(r))).map(|p| p.to_string_lossy().into_owned());
+        Ok(serde_json::json!({"path": dir.to_string_lossy(), "parent": parent, "entries": entries}))
+    }
+
     /// Start a task in the background; one task at a time.
     pub fn start(self: &Arc<Self>, task: &str, dry: bool, apply: bool, existing: Option<crate::config::ExistingJpg>) -> Result<()> {
         let mut j = self.job.lock().unwrap();

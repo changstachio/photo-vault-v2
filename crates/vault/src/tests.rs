@@ -278,3 +278,60 @@ fn save_config_validates_writes_and_applies() {
     assert_eq!(fs::read_to_string(&path).unwrap(), new);
     assert!(!t.path().join(".config.toml.vtmp").exists());
 }
+
+#[test]
+fn picker_sets_sources_keeps_comments_and_blocks_outside_paths() {
+    let t = tempfile::tempdir().unwrap();
+    let r = t.path();
+    let mut text = format!(
+        "# my notes\n[paths]\ningest = \"{r}/ingest\"\nlocal_backup = \"{r}/local\"\nnetwork_backup = \"{r}/net\"\n[sync]\ndest = \"{r}/share\" # keep\n[[sync.source]]\npath = \"{r}/ingest\"\n[ingest]\nthreads = 2\n",
+        r = r.display()
+    );
+    text.push_str("[web]\nbind = \"127.0.0.1:1\"\n");
+    for d in ["ingest/A", "ingest/B", "local", "net", "share", "outside"] {
+        fs::create_dir_all(r.join(d)).unwrap();
+    }
+    fs::write(r.join("ingest/A/x.jpg"), b"x").unwrap();
+    let path = r.join("c.toml");
+    fs::write(&path, &text).unwrap();
+    let app = crate::app::App::new(toml::from_str(&text).unwrap(), path.clone());
+    let src = |p: std::path::PathBuf| crate::config::Source { path: p, label: None };
+    // folder + single file are accepted
+    app.set_sources(vec![src(r.join("ingest/A")), src(r.join("ingest/A/x.jpg")), src(r.join("ingest/A"))]).unwrap();
+    assert_eq!(app.cfg().sync.sources.len(), 2);
+    let saved = fs::read_to_string(&path).unwrap();
+    assert!(saved.contains("# my notes") && saved.contains("# keep") && saved.contains("threads = 2"));
+    // outside the allowed folders, `..` escapes and missing paths are refused; file unchanged
+    assert!(app.set_sources(vec![src(r.join("outside"))]).is_err());
+    assert!(app.set_sources(vec![src(r.join("ingest/../outside"))]).is_err());
+    assert!(app.set_sources(vec![src(r.join("ingest/nope"))]).is_err());
+    assert_eq!(fs::read_to_string(&path).unwrap(), saved);
+    // browsing
+    let b = app.browse(&r.join("ingest").to_string_lossy()).unwrap();
+    assert_eq!(b["entries"].as_array().unwrap().len(), 2);
+    assert!(app.browse(&r.join("outside").to_string_lossy()).is_err());
+    assert_eq!(app.browse("").unwrap()["entries"].as_array().unwrap().len(), 2);
+    // clearing the list removes the entries
+    app.set_sources(vec![]).unwrap();
+    assert!(app.cfg().sync.sources.is_empty());
+}
+
+#[test]
+fn sync_accepts_single_file_sources() {
+    let t = tempfile::tempdir().unwrap();
+    let mut c = cfg(t.path());
+    put(&t.path().join("ingest/P/one.jpg"), b"1", YEAR);
+    put(&t.path().join("ingest/P/two.jpg"), b"2", YEAR);
+    put(&t.path().join("ingest/P/skip.jpg"), b"3", YEAR);
+    c.sync.sources = ["one.jpg", "two.jpg"].iter().map(|f| crate::config::Source { path: t.path().join("ingest/P").join(f), label: None }).collect();
+    crate::sync::run(&c, &Ctx::new(false, false, false)).unwrap();
+    assert!(t.path().join("share/P/one.jpg").exists() && t.path().join("share/P/two.jpg").exists());
+    assert!(!t.path().join("share/P/skip.jpg").exists());
+}
+
+#[test]
+fn url_decode_handles_percent_and_bad_input() {
+    assert_eq!(crate::util::url_decode("a%20b%2Fc+d"), "a b/c d");
+    assert_eq!(crate::util::url_decode("100%"), "100%");
+    assert_eq!(crate::util::url_decode("%zz%é"), "%zz%é");
+}

@@ -16,6 +16,10 @@ label{display:flex;align-items:center;gap:6px;color:var(--mut)}
 #st{margin:8px 0;color:var(--mut)}
 pre{background:transparent;border:1px solid var(--line);border-radius:6px;padding:10px;height:340px;overflow:auto;font:12px/1.4 ui-monospace,monospace;white-space:pre-wrap;margin:8px 0}
 textarea{width:100%;box-sizing:border-box;height:360px;background:transparent;color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:10px;font:12px/1.4 ui-monospace,monospace}
+code{flex:1;overflow:auto;white-space:nowrap;padding:8px 0;color:var(--mut)}
+.list{border:1px solid var(--line);border-radius:6px;max-height:300px;overflow:auto;margin-bottom:8px}.list.small{max-height:140px}
+.list label{padding:5px 10px;border-bottom:1px solid var(--line);color:var(--fg);display:flex;gap:8px;align-items:center}
+.list a{color:var(--acc);cursor:pointer}.list .sz{margin-left:auto;color:var(--mut);font-size:12px}
 h2 small{font-weight:normal}
 h2{font-size:14px;color:var(--mut);margin:16px 0 4px}
 .err{color:var(--bad)}
@@ -31,6 +35,13 @@ h2{font-size:14px;color:var(--mut);margin:16px 0 4px}
 <div class="bar"><i id="bar"></i></div>
 <div id="st">Idle</div>
 <pre id="log"></pre>
+<h2>Backup selection (task 1)</h2>
+<div id="pick">
+<div class="row"><button id="up">&uarr; Up</button><code id="here"></code><button id="all">Select all here</button><button id="none">Clear here</button></div>
+<div id="list" class="list"></div>
+<div class="row"><b id="selcount"></b><button id="savesel" class="p">Save selection</button><span id="selmsg"></span></div>
+<div id="chosen" class="list small"></div>
+</div>
 <h2>Schedule</h2><div id="sched"></div>
 <h2>Settings <small id="cpath"></small></h2>
 <textarea id="cfg" spellcheck="false"></textarea>
@@ -64,6 +75,26 @@ async function loadCfg(){const r=await (await fetch("/api/config")).json();
 $("reload").onclick=loadCfg;
 $("save").onclick=async()=>{const r=await (await fetch("/api/config",{method:"POST",headers:{"X-Vault":"1"},body:$("cfg").value})).json();
  $("cmsg").className=r.error?"err":"";$("cmsg").textContent=r.error?r.error:("Saved and applied"+(r.note?". "+r.note:""));tick()};
+let sel=new Set(),cur="",parent=null,ents=[];
+const esc=s=>s.replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+function drawSel(){$("selcount").textContent=sel.size+" selected";
+ $("chosen").innerHTML=[...sel].sort().map(p=>`<label><input type="checkbox" checked data-p="${esc(p)}"> ${esc(p)}</label>`).join("")||"<label>Nothing selected</label>";
+ $("chosen").querySelectorAll("input").forEach(i=>i.onchange=()=>{sel.delete(i.dataset.p);drawSel();drawList()})}
+function drawList(){$("here").textContent=cur||"(allowed folders)";$("up").disabled=cur===""&&parent===null;
+ $("list").innerHTML=ents.map((e,i)=>`<label>${cur?`<input type="checkbox" data-i="${i}" ${sel.has(e.path)?"checked":""}>`:""}${e.dir?`<a data-d="${i}">&#128193; ${esc(e.name)}</a>`:`<span>${esc(e.name)}</span><span class="sz">${gb(e.size)}</span>`}</label>`).join("")||"<label>Empty</label>";
+ $("list").querySelectorAll("input").forEach(x=>x.onchange=()=>{const p=ents[x.dataset.i].path;x.checked?sel.add(p):sel.delete(p);drawSel()});
+ $("list").querySelectorAll("a").forEach(a=>a.onclick=ev=>{ev.preventDefault();browse(ents[a.dataset.d].path)})}
+async function browse(p){const r=await (await fetch("/api/browse?path="+encodeURIComponent(p))).json();
+ if(r.error){$("selmsg").textContent=r.error;$("selmsg").className="err";return}
+ $("selmsg").textContent="";$("selmsg").className="";cur=r.path;parent=r.parent;ents=r.entries;drawList()}
+$("up").onclick=()=>browse(parent||"");
+$("all").onclick=()=>{ents.forEach(e=>sel.add(e.path));drawSel();drawList()};
+$("none").onclick=()=>{ents.forEach(e=>sel.delete(e.path));drawSel();drawList()};
+$("savesel").onclick=async()=>{const old=await (await fetch("/api/sources")).json();const lab=new Map(old.sources.map(s=>[s.path,s.label]));
+ const body=[...sel].sort().map(p=>lab.get(p)?{path:p,label:lab.get(p)}:{path:p});
+ const r=await (await fetch("/api/sources",{method:"POST",headers:{"X-Vault":"1"},body:JSON.stringify(body)})).json();
+ $("selmsg").className=r.error?"err":"";$("selmsg").textContent=r.error||"Saved. The scheduled sync will copy exactly these.";if(!r.error)loadCfg()};
+(async()=>{const s=await (await fetch("/api/sources")).json();s.sources.forEach(x=>sel.add(x.path));drawSel();browse("")})();
 loadCfg();
 tick();setInterval(tick,1000);
 </script></body></html>

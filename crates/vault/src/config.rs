@@ -122,11 +122,13 @@ impl Default for Archive {
 pub struct Web {
     pub enabled: bool,
     pub bind: String,
+    /// Folders the file picker may show and select from. Empty = the ingest and local backup folders.
+    pub browse_roots: Vec<PathBuf>,
 }
 
 impl Default for Web {
     fn default() -> Self {
-        Self { enabled: true, bind: "127.0.0.1:8787".into() }
+        Self { enabled: true, bind: "127.0.0.1:8787".into(), browse_roots: vec![] }
     }
 }
 
@@ -164,6 +166,22 @@ pub fn parse_day(s: &str) -> Result<chrono::Weekday> {
 }
 
 impl Config {
+    /// Existing folders the web file picker may show, canonicalised.
+    pub fn browse_roots(&self) -> Vec<PathBuf> {
+        let list: Vec<&PathBuf> = if self.web.browse_roots.is_empty() { vec![&self.paths.ingest, &self.paths.local_backup] } else { self.web.browse_roots.iter().collect() };
+        list.into_iter().filter_map(|p| p.canonicalize().ok()).filter(|p| p.is_dir()).collect()
+    }
+
+    /// Canonical path of `p` if it exists and lies inside a browse root (blocks `..` and symlink escapes).
+    pub fn pick_path(&self, p: &Path) -> Result<PathBuf> {
+        let c = p.canonicalize().with_context(|| format!("{} does not exist", p.display()))?;
+        if self.browse_roots().iter().any(|r| c.starts_with(r)) {
+            Ok(c)
+        } else {
+            bail!("{} is outside the allowed folders (web.browse_roots)", p.display())
+        }
+    }
+
     pub fn load(p: &Path) -> Result<Config> {
         let s = std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?;
         let c: Config = toml::from_str(&s).with_context(|| format!("parsing {}", p.display()))?;
@@ -249,6 +267,7 @@ quality = 100
 [web]
 enabled = true
 bind = "127.0.0.1:8787"                     # no login; keep on localhost or behind a reverse proxy
+browse_roots = []                           # folders the picker may show; empty = ingest + local_backup. e.g. ["/mnt/ssd", "/home/me/Pictures"]
 
 [daemon]
 run_on_start = []                           # e.g. ["sync"] to run once at boot

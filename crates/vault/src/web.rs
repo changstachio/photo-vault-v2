@@ -14,6 +14,12 @@ fn param<'a>(q: &'a str, k: &str) -> Option<&'a str> {
     q.split('&').filter_map(|kv| kv.split_once('=')).find(|(a, _)| *a == k).map(|(_, v)| v)
 }
 
+fn read_body(req: &mut tiny_http::Request) -> Option<String> {
+    let mut body = String::new();
+    let r = std::io::Read::read_to_string(&mut std::io::Read::take(req.as_reader(), 256 * 1024 + 1), &mut body);
+    (r.is_ok() && body.len() <= 256 * 1024).then_some(body)
+}
+
 /// Minimal control page and JSON API. No login: bind to localhost or put it behind a proxy.
 /// POSTs need an `X-Vault` header, which a cross-site page cannot send without a CORS preflight.
 pub fn serve(app: Arc<App>) -> Result<()> {
@@ -30,6 +36,24 @@ pub fn serve(app: Arc<App>) -> Result<()> {
                 Ok(t) => json(serde_json::json!({"path": app.cfg_path.display().to_string(), "text": t}), 200),
                 Err(e) => json(serde_json::json!({"error": e.to_string()}), 500),
             },
+            (Method::Get, "/api/browse") => match app.browse(&crate::util::url_decode(param(q, "path").unwrap_or(""))) {
+                Ok(v) => json(v, 200),
+                Err(e) => json(serde_json::json!({"error": format!("{e:#}")}), 400),
+            },
+            (Method::Get, "/api/sources") => json(serde_json::json!({"sources": app.cfg().sync.sources.iter().map(|s| serde_json::json!({"path": s.path.to_string_lossy(), "label": s.label})).collect::<Vec<_>>()}), 200),
+            (Method::Post, "/api/sources") => {
+                if !req.headers().iter().any(|h| h.field.equiv("X-Vault")) {
+                    json(serde_json::json!({"error": "missing X-Vault header"}), 403)
+                } else {
+                    match read_body(&mut req).and_then(|b| serde_json::from_str::<Vec<crate::config::Source>>(&b).ok()) {
+                        None => json(serde_json::json!({"error": "expected a JSON list of {path, label?}"}), 400),
+                        Some(list) => match app.set_sources(list) {
+                            Ok(_) => json(serde_json::json!({"ok": true}), 200),
+                            Err(e) => json(serde_json::json!({"error": format!("{e:#}")}), 400),
+                        },
+                    }
+                }
+            }
             (Method::Post, "/api/config") => {
                 if !req.headers().iter().any(|h| h.field.equiv("X-Vault")) {
                     json(serde_json::json!({"error": "missing X-Vault header"}), 403)
