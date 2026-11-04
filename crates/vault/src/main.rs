@@ -4,6 +4,8 @@ mod config;
 mod dates;
 mod ingest;
 mod job;
+mod preview;
+mod shrink;
 mod sync;
 mod util;
 mod web;
@@ -39,6 +41,8 @@ enum Cmd {
         /// ARW with a same-name JPG: rename | use_existing | overwrite (default: config)
         #[arg(long)] existing_jpg: Option<config::ExistingJpg>,
     },
+    /// 5: re-encode JPGs in the folders/zips chosen as "shrink" at the configured quality
+    Shrink { #[arg(long)] dry_run: bool },
     /// 4: report (or with --apply, fix) projects sitting in the wrong year folder
     Dates { #[arg(long)] apply: bool },
     /// Run the scheduler and web UI (for systemd)
@@ -69,6 +73,7 @@ fn main() -> Result<()> {
             *ctx.existing.lock().unwrap() = existing_jpg;
             app::run_task(&cfg, "archive", &ctx, limit)?
         }
+        Cmd::Shrink { dry_run } => app::run_task(&cfg, "shrink", &cli_ctx(dry_run, false), None)?,
         Cmd::Dates { apply } => app::run_task(&cfg, "dates", &cli_ctx(false, apply), None)?,
         Cmd::Daemon => {
             let a = app::App::new(cfg, path.clone());

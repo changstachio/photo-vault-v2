@@ -29,6 +29,19 @@ pub fn serve(app: Arc<App>) -> Result<()> {
     for mut req in server.incoming_requests() {
         let url = req.url().to_string();
         let (path, q) = url.split_once('?').unwrap_or((&url, ""));
+        if req.method() == &Method::Get && path == "/api/preview" {
+            // Slow (a LibRaw render): answered on its own thread so the page keeps updating.
+            let app = app.clone();
+            let p = crate::util::url_decode(param(q, "path").unwrap_or(""));
+            std::thread::spawn(move || {
+                let resp = match crate::preview::run(&app.cfg(), std::path::Path::new(&p)) {
+                    Ok(v) => json(v, 200),
+                    Err(e) => json(serde_json::json!({"error": format!("{e:#}")}), 400),
+                };
+                let _ = req.respond(resp);
+            });
+            continue;
+        }
         let resp = match (req.method(), path) {
             (Method::Get, "/") => Response::from_string(UI).with_header(Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap()),
             (Method::Get, "/api/state") => json(app.state(), 200),

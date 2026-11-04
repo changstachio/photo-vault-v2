@@ -28,6 +28,14 @@ Linux photo backup tool in Rust. One binary, `vault`, with four jobs, a schedule
 
 `[archive.render]` has `quality` (30-100, default 90) and `chroma` (`420` default, `422`, `444`); both can be set in the web UI under *JPG size*. The earlier default (quality 100, 4:4:4) can produce JPGs larger than a compressed ARW. 4:2:0 at quality 85-90 is normally much smaller. Each converted project logs `ARW <size> -> JPG <size> (%)` and warns when the JPGs came out larger. Real ARW sizes vary by camera and compression, so check the first few projects with `vault archive --limit 1`.
 
+## Testing a setting on a real file
+
+In the web UI, open a folder in *Convert / zip selection*, then press **Test on a random file in the folder below**. A random ARW under that folder (else a random JPG, including one inside a zip) is converted at every combination of quality 100-60 and 4:4:4 / 4:2:2 / 4:2:0, and the real size of each result is shown next to the original size. Click a cell to put that setting in the quality box, then Save. Press Test again for another random file; sizes vary by image, so try a few.
+
+## Task 5: shrinking JPGs that are already too large
+
+Set a folder, a year or a `.zip` to **shrink JPGs** in *Convert / zip selection*, set the quality in *JPG size*, and run task 5 (`vault shrink`; `--dry-run` lists what it would do). For each selected zip it re-encodes every JPG at `archive.render.quality` / `chroma` and writes a new zip next to the original (`.name.zip.vshrink`). It keeps EXIF, XMP, ICC and file times; non-JPG files are copied through unchanged. The new zip is read back, every entry is compared, and shrunk JPGs must decode at the same pixel size. Only then does it replace the original. A JPG is re-encoded only if that makes it at least `archive.shrink_min_saving_percent` (default 5) smaller, otherwise the original bytes are kept; a zip whose total saving is below that is left untouched. Folders are handled in place the same way. Re-encoding a JPG is lossy (generation loss), so keep a copy until you are happy with the result, and test a setting first.
+
 ## Choosing what task 3 touches
 
 In the web UI's *Convert / zip selection*, open the local backup folders and set each year or project to **skip**, **convert** (ARW to JPG, no zip) or **convert + zip**. A choice on a year folder covers its projects; a choice on a project overrides it. Folders with no choice use `archive.default`, which is `none`: nothing is converted, zipped or deleted until you choose. Saved as `[[archive.rule]]` entries (`path`, `mode`) in the config file.

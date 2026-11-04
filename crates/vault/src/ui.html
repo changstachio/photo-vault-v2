@@ -46,7 +46,9 @@ h2{font-size:14px;color:var(--mut);margin:16px 0 4px}
 <div class="row"><label>Quality <input type="number" id="q" min="30" max="100" style="width:70px"></label>
 <label>Chroma <select id="chroma"><option value="420">4:2:0 (smallest)</option><option value="422">4:2:2</option><option value="444">4:4:4 (largest)</option></select></label>
 <button id="qsave" class="p">Save</button><span id="qmsg"></span></div>
-<p style="color:var(--mut);margin:0 0 8px">Lower quality and 4:2:0 make smaller JPGs. Each project's log line shows ARW size vs JPG size.</p>
+<div class="row"><button id="qtest">Test on a random file in the folder below</button><span id="qtestmsg" style="color:var(--mut)"></span></div>
+<div id="qtable"></div>
+<p style="color:var(--mut);margin:0 0 8px">Pick a folder in the list below, press Test: a random ARW in it (else a random JPG, also inside zips) is converted at each setting and the real sizes are shown. Click a cell to use that setting. Each project's log line also shows ARW size vs JPG size.</p>
 <h2>Convert / zip selection (task 3)</h2>
 <div class="row"><button id="aup">&uarr; Up</button><code id="ahere"></code></div>
 <div id="alist" class="list"></div>
@@ -59,7 +61,7 @@ h2{font-size:14px;color:var(--mut);margin:16px 0 4px}
 <h2>Daemon events</h2><pre id="ev" style="height:100px"></pre>
 </main>
 <script>
-const T=[["sync","1 · Sync to network share"],["ingest","2 · Ingest to local backup"],["archive","3 · Convert + zip"],["dates","4 · Check years"]];
+const T=[["sync","1 · Sync to network share"],["ingest","2 · Ingest to local backup"],["archive","3 · Convert + zip"],["dates","4 · Check years"],["shrink","5 · Shrink JPGs"]];
 const $=id=>document.getElementById(id);
 const post=(u)=>fetch(u,{method:"POST",headers:{"X-Vault":"1"}}).then(r=>r.json());
 T.forEach(([t,l])=>{const b=document.createElement("button");b.textContent=l;b.className="p";b.dataset.t=t;
@@ -88,12 +90,22 @@ $("save").onclick=async()=>{const r=await (await fetch("/api/config",{method:"PO
 (async()=>{const r=await (await fetch("/api/render")).json();$("q").value=r.quality;$("chroma").value=r.chroma})();
 $("qsave").onclick=async()=>{const r=await (await fetch("/api/render",{method:"POST",headers:{"X-Vault":"1"},body:JSON.stringify({quality:+$("q").value,chroma:$("chroma").value})})).json();
  $("qmsg").className=r.error?"err":"";$("qmsg").textContent=r.error||"Saved";if(!r.error)loadCfg()};
+$("qtest").onclick=async()=>{const b=$("qtest");b.disabled=true;$("qtestmsg").textContent="Testing "+(acur||"")+" ...";$("qtable").innerHTML="";
+ try{const r=await (await fetch("/api/preview?path="+encodeURIComponent(acur))).json();
+  if(r.error){$("qtestmsg").textContent=r.error;$("qtestmsg").className="err";return}
+  $("qtestmsg").className="";$("qtestmsg").textContent=`${r.file} - original ${(r.source_size/1e6).toFixed(1)} MB, ${r.width}x${r.height}. ${r.note}`;
+  const qs=[...new Set(r.rows.map(x=>x.quality))],cs=[...new Set(r.rows.map(x=>x.chroma))];
+  $("qtable").innerHTML="<table style='border-collapse:collapse;margin:8px 0'><tr><th style='text-align:left;padding:4px 10px'>Quality</th>"+cs.map(c=>`<th style='padding:4px 10px'>4:${c[1]}:${c[2]}</th>`).join("")+"</tr>"+
+   qs.map(q=>`<tr><td style='padding:4px 10px'>${q}</td>`+cs.map(c=>{const x=r.rows.find(y=>y.quality===q&&y.chroma===c);const cur=q===r.current.quality&&c===r.current.chroma;
+    return `<td data-q="${q}" data-c="${c}" style='padding:4px 10px;border:1px solid var(--line);cursor:pointer;${cur?"outline:2px solid var(--acc);":""}${x.pct>100?"color:var(--bad);":""}'>${(x.size/1e6).toFixed(1)} MB (${x.pct.toFixed(0)}%)</td>`}).join("")+"</tr>").join("")+"</table>";
+  $("qtable").querySelectorAll("td[data-q]").forEach(td=>td.onclick=()=>{$("q").value=td.dataset.q;$("chroma").value=td.dataset.c;$("qmsg").textContent="Press Save to keep this setting"});
+ }finally{b.disabled=false}};
 let rules=new Map(),acur="",aparent=null,aents=[],adefault="none";
-const MODES=[["","\u2014 (inherit)"],["none","skip"],["convert","convert"],["convert_zip","convert + zip"]];
+const MODES=[["","\u2014 (inherit)"],["none","skip"],["convert","convert"],["convert_zip","convert + zip"],["shrink","shrink JPGs (task 5)"]];
 function inherited(p){let best=null,bl=-1;for(const [rp,m] of rules){if((p===rp||p.startsWith(rp+"/"))&&rp.length>bl&&p!==rp){best=m;bl=rp.length}}return best}
 function drawA(){$("ahere").textContent=acur;$("aup").disabled=!aparent;$("adef").textContent=adefault;
  $("acount").textContent=rules.size+" choice(s)";
- $("alist").innerHTML=aents.map((e,i)=>`<label><a data-d="${i}">&#128193; ${esc(e.name)}</a><span class="sz"><select data-i="${i}">${MODES.map(([v,l])=>`<option value="${v}" ${(rules.get(e.path)||"")===v?"selected":""}>${l}</option>`).join("")}</select>${!rules.has(e.path)&&inherited(e.path)?" <small>inherits: "+inherited(e.path)+"</small>":""}</span></label>`).join("")||"<label>No folders</label>";
+ $("alist").innerHTML=aents.map((e,i)=>`<label>${e.dir?`<a data-d="${i}">&#128193; ${esc(e.name)}</a>`:`<span>&#128230; ${esc(e.name)}</span>`}<span class="sz"><select data-i="${i}">${MODES.map(([v,l])=>`<option value="${v}" ${(rules.get(e.path)||"")===v?"selected":""}>${l}</option>`).join("")}</select>${!rules.has(e.path)&&inherited(e.path)?" <small>inherits: "+inherited(e.path)+"</small>":""}</span></label>`).join("")||"<label>No folders</label>";
  $("alist").querySelectorAll("select").forEach(x=>x.onchange=()=>{const p=aents[x.dataset.i].path;x.value?rules.set(p,x.value):rules.delete(p);drawA()});
  $("alist").querySelectorAll("a").forEach(a=>a.onclick=ev=>{ev.preventDefault();abrowse(aents[a.dataset.d].path)})}
 async function abrowse(p){const r=await (await fetch("/api/browse?scope=archive&path="+encodeURIComponent(p))).json();

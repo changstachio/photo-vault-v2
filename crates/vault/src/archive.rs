@@ -38,7 +38,7 @@ pub fn run(cfg: &Config, ctx: &Ctx, limit: Option<usize>) -> Result<()> {
         projects.extend(ps.into_iter().map(|(_, p)| p));
     }
     let total = projects.len();
-    let mut projects: Vec<(PathBuf, ArchiveMode)> = projects.into_iter().map(|p| { let m = cfg.archive_mode(&p); (p, m) }).filter(|(_, m)| *m != ArchiveMode::None).collect();
+    let mut projects: Vec<(PathBuf, ArchiveMode)> = projects.into_iter().map(|p| { let m = cfg.archive_mode(&p); (p, m) }).filter(|(_, m)| matches!(*m, ArchiveMode::Convert | ArchiveMode::ConvertZip)).collect();
     if let Some(n) = limit {
         projects.truncate(n);
     }

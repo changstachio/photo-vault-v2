@@ -451,3 +451,167 @@ fn render_settings_save_and_smaller_jpgs() {
     let big = size(100, vault_raw::Chroma::C444);
     assert!(size(90, vault_raw::Chroma::C420) < big && size(75, vault_raw::Chroma::C420) < size(90, vault_raw::Chroma::C420), "q100/444 = {big}");
 }
+
+fn big_jpg(dir: &Path, name: &str) -> Vec<u8> {
+    let dng = dir.join("tmp.dng");
+    fs::write(&dng, vault_raw::testdng::make(512, 384)).unwrap();
+    let r = vault_raw::Render { quality: 100, chroma: vault_raw::Chroma::C444, ..Default::default() };
+    let (_, j) = vault_raw::render_jpg(&dng, vault_raw::ColourMode::Preserve, 3, &r).unwrap();
+    let _ = name;
+    j
+}
+
+fn shrink_cfg(t: &Path, target: &Path) -> Config {
+    use crate::config::{ArchiveMode, Rule};
+    let mut c = cfg(t);
+    c.archive.rules = vec![Rule { path: target.to_path_buf(), mode: ArchiveMode::Shrink }];
+    c.archive.render.quality = 80;
+    c.archive.render.chroma = vault_raw::Chroma::C420;
+    c
+}
+
+fn write_test_zip(path: &Path, jpg: &[u8]) {
+    let mut z = zip::ZipWriter::new(fs::File::create(path).unwrap());
+    let st = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    let dt = zip::DateTime::from_date_and_time(2016, 5, 4, 3, 2, 0).unwrap();
+    z.add_directory("P/sub", st).unwrap();
+    z.start_file("P/a.jpg", st.last_modified_time(dt)).unwrap();
+    std::io::Write::write_all(&mut z, jpg).unwrap();
+    z.start_file("P/sub/b.JPEG", st).unwrap();
+    std::io::Write::write_all(&mut z, jpg).unwrap();
+    z.start_file("P/notes.txt", zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated)).unwrap();
+    std::io::Write::write_all(&mut z, b"hello hello hello hello hello hello").unwrap();
+    z.finish().unwrap();
+}
+
+#[test]
+fn shrink_rebuilds_zip_smaller_keeping_names_times_metadata() {
+    let t = tempfile::tempdir().unwrap();
+    let jpg = big_jpg(t.path(), "x");
+    let zp = t.path().join("local/2016/P.zip");
+    fs::create_dir_all(zp.parent().unwrap()).unwrap();
+    write_test_zip(&zp, &jpg);
+    let before = fs::metadata(&zp).unwrap().len();
+    let c = shrink_cfg(t.path(), &t.path().join("local/2016"));
+    crate::shrink::run(&c, &Ctx::new(true, false, false)).unwrap();
+    assert_eq!(fs::metadata(&zp).unwrap().len(), before, "dry run changes nothing");
+    crate::shrink::run(&c, &Ctx::new(false, false, false)).unwrap();
+    let after = fs::metadata(&zp).unwrap().len();
+    assert!(after < before * 9 / 10, "{after} vs {before}");
+    let mut z = zip::ZipArchive::new(fs::File::open(&zp).unwrap()).unwrap();
+    let names: Vec<String> = (0..z.len()).map(|i| z.by_index(i).unwrap().name().unwrap().to_string()).collect();
+    assert_eq!(names.len(), 4);
+    for n in ["P/sub/", "P/a.jpg", "P/sub/b.JPEG", "P/notes.txt"] {
+        assert!(names.iter().any(|x| x == n), "{n} in {names:?}");
+    }
+    let mut buf = Vec::new();
+    std::io::Read::read_to_end(&mut z.by_name("P/a.jpg").unwrap(), &mut buf).unwrap();
+    let info = vault_raw::probe_decode_bytes(&buf).unwrap();
+    assert_eq!((info.width, info.height), (512, 384));
+    assert!(info.has_icc, "ICC profile kept");
+    assert!(buf.len() < jpg.len());
+    let dt = z.by_name("P/a.jpg").unwrap().last_modified().unwrap();
+    assert_eq!((dt.year(), dt.month(), dt.day()), (2016, 5, 4), "entry time kept");
+    let mut txt = String::new();
+    std::io::Read::read_to_string(&mut z.by_name("P/notes.txt").unwrap(), &mut txt).unwrap();
+    assert!(txt.starts_with("hello"));
+    assert!(fs::read_dir(zp.parent().unwrap()).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().ends_with(".vshrink")));
+    // a second run finds nothing worth doing and leaves the file byte for byte alone
+    let once = fs::read(&zp).unwrap();
+    crate::shrink::run(&c, &Ctx::new(false, false, false)).unwrap();
+    assert_eq!(fs::read(&zp).unwrap(), once);
+}
+
+#[test]
+fn shrink_leaves_zip_alone_below_threshold_and_keeps_broken_jpgs() {
+    let t = tempfile::tempdir().unwrap();
+    let jpg = big_jpg(t.path(), "x");
+    let zp = t.path().join("local/2016/P.zip");
+    fs::create_dir_all(zp.parent().unwrap()).unwrap();
+    write_test_zip(&zp, &jpg);
+    let orig = fs::read(&zp).unwrap();
+    let mut c = shrink_cfg(t.path(), &zp);
+    c.archive.shrink_min_saving_percent = 99.0;
+    crate::shrink::run(&c, &Ctx::new(false, false, false)).unwrap();
+    assert_eq!(fs::read(&zp).unwrap(), orig);
+    // a "JPG" that does not decode is copied through untouched, never dropped
+    let zp2 = t.path().join("local/2016/Q.zip");
+    let mut z = zip::ZipWriter::new(fs::File::create(&zp2).unwrap());
+    let st = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    z.start_file("Q/good.jpg", st).unwrap();
+    std::io::Write::write_all(&mut z, &jpg).unwrap();
+    z.start_file("Q/bad.jpg", st).unwrap();
+    std::io::Write::write_all(&mut z, b"not a jpeg at all").unwrap();
+    z.finish().unwrap();
+    let c = shrink_cfg(t.path(), &zp2);
+    crate::shrink::run(&c, &Ctx::new(false, false, false)).unwrap();
+    let mut z = zip::ZipArchive::new(fs::File::open(&zp2).unwrap()).unwrap();
+    let mut buf = Vec::new();
+    std::io::Read::read_to_end(&mut z.by_name("Q/bad.jpg").unwrap(), &mut buf).unwrap();
+    assert_eq!(buf, b"not a jpeg at all");
+}
+
+#[test]
+fn shrink_folder_in_place_keeps_mtime() {
+    let t = tempfile::tempdir().unwrap();
+    let jpg = big_jpg(t.path(), "x");
+    let d = t.path().join("local/2016/Dir");
+    put(&d.join("a.jpg"), &jpg, 3 * YEAR);
+    put(&d.join("s/b.jpg"), &jpg, 3 * YEAR);
+    let mtime = fs::metadata(d.join("a.jpg")).unwrap().modified().unwrap();
+    let c = shrink_cfg(t.path(), &d);
+    crate::shrink::run(&c, &Ctx::new(false, false, false)).unwrap();
+    assert!(fs::metadata(d.join("a.jpg")).unwrap().len() < jpg.len() as u64 * 9 / 10);
+    assert_eq!(fs::metadata(d.join("a.jpg")).unwrap().modified().unwrap(), mtime);
+    assert!(vault_raw::probe_decode(&d.join("s/b.jpg")).is_ok());
+}
+
+#[test]
+fn archive_ignores_shrink_folders_and_shrink_ignores_others() {
+    let t = tempfile::tempdir().unwrap();
+    let jpg = big_jpg(t.path(), "x");
+    let d = t.path().join("local/2016/Dir");
+    fs::create_dir_all(&d).unwrap();
+    fs::write(d.join("a.arw"), vault_raw::testdng::make(64, 48)).unwrap();
+    put(&d.join("b.jpg"), &jpg, YEAR);
+    let c = shrink_cfg(t.path(), &d);
+    crate::archive::run(&c, &Ctx::new(false, false, false), None).unwrap();
+    assert!(d.join("a.arw").exists(), "archive leaves shrink-mode folders alone");
+    let other = t.path().join("local/2016/Other/x.jpg");
+    put(&other, &jpg, YEAR);
+    crate::shrink::run(&c, &Ctx::new(false, false, false)).unwrap();
+    assert_eq!(fs::metadata(&other).unwrap().len(), jpg.len() as u64, "unselected folder untouched");
+}
+
+#[test]
+fn preview_picks_random_arw_then_jpg_and_stays_inside_backup() {
+    let t = tempfile::tempdir().unwrap();
+    let c = cfg(t.path());
+    let root = t.path().join("local");
+    // nothing to test yet
+    assert!(crate::preview::run(&c, &root).is_err());
+    // a zip with a JPG inside
+    let jpg = big_jpg(t.path(), "x");
+    let zp = root.join("2016/P.zip");
+    fs::create_dir_all(zp.parent().unwrap()).unwrap();
+    write_test_zip(&zp, &jpg);
+    let v = crate::preview::run(&c, &root).unwrap();
+    assert_eq!(v["kind"], "jpg");
+    assert!(v["file"].as_str().unwrap().contains("P.zip >"));
+    let rows = v["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 24);
+    let size = |q: u64, ch: &str| rows.iter().find(|r| r["quality"] == q && r["chroma"] == ch).unwrap()["size"].as_u64().unwrap();
+    assert!(size(80, "420") < size(100, "444") && size(60, "420") < size(80, "420"));
+    // an ARW takes priority and is measured against its own size
+    let arw = root.join("2016/Raw/a.arw");
+    fs::create_dir_all(arw.parent().unwrap()).unwrap();
+    fs::write(&arw, vault_raw::testdng::make(256, 192)).unwrap();
+    let v = crate::preview::run(&c, &root).unwrap();
+    assert_eq!(v["kind"], "arw");
+    assert_eq!(v["source_size"].as_u64().unwrap(), fs::metadata(&arw).unwrap().len());
+    assert_eq!((v["width"].as_u64().unwrap(), v["height"].as_u64().unwrap()), (256, 192));
+    // outside the local backup folder is refused
+    fs::create_dir_all(t.path().join("outside")).unwrap();
+    assert!(crate::preview::run(&c, &t.path().join("outside")).is_err());
+    assert!(crate::preview::run(&c, &root.join("../outside")).is_err());
+}

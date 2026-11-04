@@ -111,6 +111,8 @@ pub enum ArchiveMode {
     Convert,
     /// ARW to JPG, then zip the folder (any file types; no ARW may remain).
     ConvertZip,
+    /// Task 5 only: re-encode the JPGs already in the folder or `.zip` at the configured quality.
+    Shrink,
 }
 
 impl ArchiveMode {
@@ -119,6 +121,7 @@ impl ArchiveMode {
             Self::None => "none",
             Self::Convert => "convert",
             Self::ConvertZip => "convert_zip",
+            Self::Shrink => "shrink",
         }
     }
 }
@@ -136,6 +139,8 @@ pub struct Rule {
 pub struct Archive {
     /// Mode for projects no rule matches. `none` means nothing is touched until you choose folders.
     pub default: ArchiveMode,
+    /// Task 5 replaces a zip only if the JPGs inside shrink by at least this many percent.
+    pub shrink_min_saving_percent: f32,
     #[serde(rename = "rule")]
     pub rules: Vec<Rule>,
     pub existing_jpg: ExistingJpg,
@@ -148,7 +153,7 @@ pub struct Archive {
 impl Default for Archive {
     fn default() -> Self {
         let n = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-        Self { default: ArchiveMode::None, rules: vec![], existing_jpg: ExistingJpg::Rename, threads: (n / 2).max(1), demosaic: 3, colour: ColourMode::Preserve, render: Render::default() }
+        Self { default: ArchiveMode::None, shrink_min_saving_percent: 5.0, rules: vec![], existing_jpg: ExistingJpg::Rename, threads: (n / 2).max(1), demosaic: 3, colour: ColourMode::Preserve, render: Render::default() }
     }
 }
 
@@ -185,7 +190,7 @@ pub struct Schedule {
     pub days: Vec<String>,
 }
 
-pub const TASKS: [&str; 4] = ["sync", "ingest", "archive", "dates"];
+pub const TASKS: [&str; 5] = ["sync", "ingest", "archive", "dates", "shrink"];
 
 pub fn parse_hhmm(s: &str) -> Result<(u32, u32)> {
     let (h, m) = s.split_once(':').with_context(|| format!("bad time {s:?}, expected HH:MM"))?;
@@ -344,7 +349,8 @@ min_idle_minutes = 30                       # skip projects touched more recentl
 threads = 4
 
 [archive]                                   # part 3: ARW -> JPG, then zip projects with no ARW left
-default = "none"                            # projects without a rule: none | convert | convert_zip. Choose folders in the web UI.
+default = "none"                            # projects without a rule: none | convert | convert_zip | shrink. Choose folders in the web UI.
+shrink_min_saving_percent = 5               # task 5 keeps a zip as is unless its JPGs shrink by at least this much
 threads = 4
 existing_jpg = "rename"                   # ARW with a same-name JPG: rename | use_existing (delete the ARW, no conversion) | overwrite
 demosaic = 3

@@ -27,6 +27,7 @@ pub fn run_task(cfg: &Config, task: &str, ctx: &Ctx, limit: Option<usize>) -> Re
         "ingest" => crate::ingest::run(cfg, ctx),
         "archive" => crate::archive::run(cfg, ctx, limit),
         "dates" => crate::dates::run(cfg, ctx),
+        "shrink" => crate::shrink::run(cfg, ctx),
         t => bail!("unknown task {t}"),
     }
 }
@@ -111,8 +112,8 @@ impl App {
         let mut seen = std::collections::HashSet::new();
         for r in &list {
             let p = r.path.canonicalize().map_err(|e| anyhow::anyhow!("{}: {e}", r.path.display()))?;
-            if !p.starts_with(&root) || !p.is_dir() {
-                bail!("{} is not a folder inside the local backup folder", r.path.display());
+            if !p.starts_with(&root) || !(p.is_dir() || (p.is_file() && crate::util::ext_lower(&p) == "zip")) {
+                bail!("{} is not a folder or zip inside the local backup folder", r.path.display());
             }
             if !seen.insert(p.clone()) {
                 continue;
@@ -176,7 +177,7 @@ impl App {
             let e = e?;
             let ft = e.file_type()?;
             let name = e.file_name().to_string_lossy().into_owned();
-            if ft.is_symlink() || name.starts_with('.') || !(ft.is_dir() || (ft.is_file() && !archive)) {
+            if ft.is_symlink() || name.starts_with('.') || !(ft.is_dir() || (ft.is_file() && (!archive || name.to_lowercase().ends_with(".zip")))) {
                 continue;
             }
             let size = if ft.is_file() { e.metadata().map(|m| m.len()).unwrap_or(0) } else { 0 };

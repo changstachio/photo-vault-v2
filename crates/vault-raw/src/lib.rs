@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 pub mod exifcopy;
 pub mod icc;
+pub mod recompress;
 pub mod types;
 
 use anyhow::{bail, Context, Result};
@@ -46,8 +47,16 @@ pub fn convert(arw: &Path, out: &Path, mode: ColourMode, demosaic: i32, render: 
     Ok(c)
 }
 
-/// Render `arw` to JPG bytes in memory without touching the disk.
-pub fn render_jpg(arw: &Path, mode: ColourMode, demosaic: i32, render: &Render) -> Result<(Converted, Vec<u8>)> {
+struct Rendered {
+    px: Vec<u8>,
+    w: u32,
+    h: u32,
+    space: Space,
+    exif: Option<Vec<u8>>,
+}
+
+/// LibRaw render of `arw` to 8-bit RGB (the slow part; shared by every output setting).
+fn render_pixels(arw: &Path, mode: ColourMode, demosaic: i32, render: &Render) -> Result<Rendered> {
     let buf = std::fs::read(arw).with_context(|| format!("read {}", arw.display()))?;
     let mut raw = libraw_lite::Raw::open(&buf).map_err(|e| anyhow::anyhow!("open raw: {e}"))?;
     let space = match mode {
@@ -82,24 +91,67 @@ pub fn render_jpg(arw: &Path, mode: ColourMode, demosaic: i32, render: &Render) 
     if w == 0 || h == 0 || w > u16::MAX as u32 || h > u16::MAX as u32 {
         bail!("unexpected image size {w}x{h}");
     }
-    let px = img.pixels();
-    let mut jpg = Vec::with_capacity(px.len() / 4);
-    let mut enc = Encoder::new(&mut jpg, render.quality.clamp(1, 100));
-    enc.set_sampling_factor(match render.chroma {
+    let px = img.pixels().to_vec();
+    drop(img);
+    let exif = exifcopy::build(&buf, w, h, space);
+    Ok(Rendered { px, w, h, space, exif })
+}
+
+fn encode_rendered(r: &Rendered, quality: u8, chroma: Chroma) -> Result<Vec<u8>> {
+    let mut jpg = Vec::with_capacity(r.px.len() / 4);
+    let mut enc = Encoder::new(&mut jpg, quality.clamp(1, 100));
+    enc.set_sampling_factor(match chroma {
         Chroma::C444 => SamplingFactor::R_4_4_4,
         Chroma::C422 => SamplingFactor::R_4_2_2,
         Chroma::C420 => SamplingFactor::R_4_2_0,
     });
     enc.set_optimized_huffman_tables(true);
-    enc.add_icc_profile(&icc::profile(space)).map_err(|e| anyhow::anyhow!("icc: {e}"))?;
-    if let Some(x) = exifcopy::build(&buf, w, h, space) {
-        let _ = enc.add_exif_metadata(&x);
+    enc.add_icc_profile(&icc::profile(r.space)).map_err(|e| anyhow::anyhow!("icc: {e}"))?;
+    if let Some(x) = &r.exif {
+        let _ = enc.add_exif_metadata(x);
     }
-    enc.encode(px, w as u16, h as u16, ColorType::Rgb).map_err(|e| anyhow::anyhow!("encode: {e}"))?;
-    drop(img);
+    enc.encode(&r.px, r.w as u16, r.h as u16, ColorType::Rgb).map_err(|e| anyhow::anyhow!("encode: {e}"))?;
+    Ok(jpg)
+}
+
+/// Render `arw` to JPG bytes in memory without touching the disk.
+pub fn render_jpg(arw: &Path, mode: ColourMode, demosaic: i32, render: &Render) -> Result<(Converted, Vec<u8>)> {
+    let r = render_pixels(arw, mode, demosaic, render)?;
+    let jpg = encode_rendered(&r, render.quality, render.chroma)?;
     let hash = *blake3::hash(&jpg).as_bytes();
     let size = jpg.len() as u64;
-    Ok((Converted { width: w, height: h, size, hash, space }, jpg))
+    Ok((Converted { width: r.w, height: r.h, size, hash, space: r.space }, jpg))
+}
+
+/// JPG size for each (quality, chroma) in `variants`, from a single LibRaw render of `arw`
+/// (encodes run in parallel). Returns (pixel width, pixel height, sizes in the same order).
+pub fn size_table(arw: &Path, mode: ColourMode, demosaic: i32, render: &Render, variants: &[(u8, Chroma)]) -> Result<(u32, u32, Vec<usize>)> {
+    let r = render_pixels(arw, mode, demosaic, render)?;
+    let sizes = parallel_sizes(variants, |q, c| encode_rendered(&r, q, c).map(|j| j.len()))?;
+    Ok((r.w, r.h, sizes))
+}
+
+/// JPG size for each (quality, chroma) when an existing JPG is re-encoded.
+pub fn size_table_jpg(jpg: &[u8], variants: &[(u8, Chroma)]) -> Result<(u32, u32, Vec<usize>)> {
+    let mut d = jpeg_decoder::Decoder::new(jpg);
+    let px = d.decode().map_err(|e| anyhow::anyhow!("{e}"))?;
+    let info = d.info().context("no image info")?;
+    let sizes = parallel_sizes(variants, |q, c| recompress::recompress_pixels(jpg, &px, &info, q, c).map(|j| j.len()))?;
+    Ok((info.width as u32, info.height as u32, sizes))
+}
+
+fn parallel_sizes(variants: &[(u8, Chroma)], f: impl Fn(u8, Chroma) -> Result<usize> + Sync) -> Result<Vec<usize>> {
+    let n = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(8);
+    let mut out = vec![0usize; variants.len()];
+    let f = &f;
+    std::thread::scope(|s| -> Result<()> {
+        let hs: Vec<_> = out.chunks_mut(variants.len().div_ceil(n).max(1)).zip(variants.chunks(variants.len().div_ceil(n).max(1))).map(|(o, v)| s.spawn(move || -> Result<()> { for (slot, (q, c)) in o.iter_mut().zip(v) { *slot = f(*q, *c)?; } Ok(()) })).collect();
+        for h in hs {
+            h.join().map_err(|_| anyhow::anyhow!("encoder thread panicked"))??;
+        }
+        Ok(())
+    })?;
+    Ok(out)
 }
 
 pub struct JpgInfo {
