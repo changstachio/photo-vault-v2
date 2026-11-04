@@ -21,6 +21,8 @@ label = "ing"
 [ingest]
 min_idle_minutes = 0
 threads = 2
+[archive]
+default = "convert_zip"
 "#,
         r = root.display()
     );
@@ -307,10 +309,10 @@ fn picker_sets_sources_keeps_comments_and_blocks_outside_paths() {
     assert!(app.set_sources(vec![src(r.join("ingest/nope"))]).is_err());
     assert_eq!(fs::read_to_string(&path).unwrap(), saved);
     // browsing
-    let b = app.browse(&r.join("ingest").to_string_lossy()).unwrap();
+    let b = app.browse(&r.join("ingest").to_string_lossy(), false).unwrap();
     assert_eq!(b["entries"].as_array().unwrap().len(), 2);
-    assert!(app.browse(&r.join("outside").to_string_lossy()).is_err());
-    assert_eq!(app.browse("").unwrap()["entries"].as_array().unwrap().len(), 2);
+    assert!(app.browse(&r.join("outside").to_string_lossy(), false).is_err());
+    assert_eq!(app.browse("", false).unwrap()["entries"].as_array().unwrap().len(), 2);
     // clearing the list removes the entries
     app.set_sources(vec![]).unwrap();
     assert!(app.cfg().sync.sources.is_empty());
@@ -358,7 +360,55 @@ fn picker_reports_why_roots_are_unusable() {
     c.paths.ingest = t.path().join("missing");
     c.paths.local_backup = t.path().join("missing2");
     let app = crate::app::App::new(c, t.path().join("c.toml"));
-    let b = app.browse("").unwrap();
+    let b = app.browse("", false).unwrap();
     assert_eq!(b["entries"].as_array().unwrap().len(), 0);
     assert_eq!(b["skipped"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn archive_rules_choose_convert_only_zip_or_skip_by_folder() {
+    let t = tempfile::tempdir().unwrap();
+    let mut c = cfg(t.path());
+    c.archive.default = crate::config::ArchiveMode::None;
+    let mk = |y: &str, n: &str| {
+        let d = t.path().join(format!("local/{y}/{n}"));
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("a.arw"), vault_raw::testdng::make(64, 48)).unwrap();
+        d
+    };
+    let (untouched, conv, zipd, skip) = (mk("2014", "Untouched"), mk("2015", "ConvOnly"), mk("2016", "Zipped"), mk("2016", "Skipped"));
+    let rule = |p: &Path, m| crate::config::Rule { path: p.to_path_buf(), mode: m };
+    use crate::config::ArchiveMode::*;
+    c.archive.rules = vec![rule(&t.path().join("local/2015"), Convert), rule(&t.path().join("local/2016"), ConvertZip), rule(&skip, None)];
+    crate::archive::run(&c, &Ctx::new(false, false, false), Option::None).unwrap();
+    assert!(untouched.join("a.arw").exists(), "no rule: untouched");
+    assert!(conv.join("a.jpg").exists() && !conv.join("a.arw").exists() && conv.is_dir(), "converted, not zipped");
+    assert!(!zipd.exists() && t.path().join("local/2016/Zipped.zip").exists(), "converted and zipped");
+    assert!(skip.join("a.arw").exists(), "deeper rule skips");
+}
+
+#[test]
+fn archive_rules_save_only_inside_local_backup_and_keep_comments() {
+    let t = tempfile::tempdir().unwrap();
+    let r = t.path();
+    let text = format!("# note\n[paths]\ningest = \"{r}/ingest\"\nlocal_backup = \"{r}/local\"\nnetwork_backup = \"{r}/net\"\n[archive]\nthreads = 2 # keep\n[archive.render]\nquality = 90\n", r = r.display());
+    for d in ["ingest", "local/2015/P", "net", "other"] {
+        fs::create_dir_all(r.join(d)).unwrap();
+    }
+    let path = r.join("c.toml");
+    fs::write(&path, &text).unwrap();
+    let app = crate::app::App::new(toml::from_str(&text).unwrap(), path.clone());
+    let rule = |p: std::path::PathBuf, m| crate::config::Rule { path: p, mode: m };
+    app.set_archive_rules(vec![rule(r.join("local/2015"), crate::config::ArchiveMode::ConvertZip)]).unwrap();
+    assert_eq!(app.cfg().archive.rules.len(), 1);
+    assert_eq!(app.cfg().archive_mode(&r.join("local/2015/P")), crate::config::ArchiveMode::ConvertZip);
+    assert_eq!(app.cfg().archive_mode(&r.join("local/2016/Q")), crate::config::ArchiveMode::None);
+    let saved = fs::read_to_string(&path).unwrap();
+    assert!(saved.contains("# note") && saved.contains("# keep") && saved.contains("quality = 90"));
+    assert!(app.set_archive_rules(vec![rule(r.join("other"), crate::config::ArchiveMode::Convert)]).is_err());
+    assert!(app.set_archive_rules(vec![rule(r.join("local/../other"), crate::config::ArchiveMode::Convert)]).is_err());
+    assert_eq!(fs::read_to_string(&path).unwrap(), saved);
+    let b = app.browse("", true).unwrap();
+    assert_eq!(b["entries"].as_array().unwrap().len(), 1);
+    assert!(app.browse(&r.join("other").to_string_lossy(), true).is_err());
 }

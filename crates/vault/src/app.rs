@@ -102,21 +102,64 @@ impl App {
         self.save_config(&doc.to_string())
     }
 
-    /// One level of a folder for the picker. Empty `path` lists the allowed roots.
-    pub fn browse(&self, path: &str) -> Result<serde_json::Value> {
+    /// Replace the `[[archive.rule]]` list (folders must be inside the local backup folder).
+    pub fn set_archive_rules(&self, list: Vec<crate::config::Rule>) -> Result<Option<String>> {
+        use toml_edit::{value, ArrayOfTables, DocumentMut, Item, Table};
         let cfg = self.cfg();
-        let roots = cfg.browse_roots();
+        let root = cfg.paths.local_backup.canonicalize().map_err(|e| anyhow::anyhow!("local backup folder not accessible: {e}"))?;
+        let mut arr = ArrayOfTables::new();
+        let mut seen = std::collections::HashSet::new();
+        for r in &list {
+            let p = r.path.canonicalize().map_err(|e| anyhow::anyhow!("{}: {e}", r.path.display()))?;
+            if !p.starts_with(&root) || !p.is_dir() {
+                bail!("{} is not a folder inside the local backup folder", r.path.display());
+            }
+            if !seen.insert(p.clone()) {
+                continue;
+            }
+            let mut t = Table::new();
+            t["path"] = value(p.to_string_lossy().into_owned());
+            t["mode"] = value(r.mode.as_str());
+            arr.push(t);
+        }
+        let mut doc: DocumentMut = self.config_text()?.parse().map_err(|e| anyhow::anyhow!("config file does not parse: {e}"))?;
+        if !doc.contains_key("archive") {
+            doc["archive"] = Item::Table(Table::new());
+        }
+        let t = doc["archive"].as_table_mut().ok_or_else(|| anyhow::anyhow!("[archive] is not a table"))?;
+        t.remove("rule");
+        if !arr.is_empty() {
+            t.insert("rule", Item::ArrayOfTables(arr));
+        }
+        self.save_config(&doc.to_string())
+    }
+
+    /// One level of a folder for the picker. Empty `path` lists the allowed roots. With `archive`,
+    /// only folders inside the local backup folder are shown (starting at its top).
+    pub fn browse(&self, path: &str, archive: bool) -> Result<serde_json::Value> {
+        let cfg = self.cfg();
+        let roots = if archive { cfg.paths.local_backup.canonicalize().into_iter().collect() } else { cfg.browse_roots() };
+        let path = if archive && path.is_empty() { roots.first().map(|r: &std::path::PathBuf| r.to_string_lossy().into_owned()).ok_or_else(|| anyhow::anyhow!("local backup folder {} is not accessible to the service user", cfg.paths.local_backup.display()))? } else { path.to_string() };
+        let path = path.as_str();
         if path.is_empty() {
             let skipped: Vec<_> = cfg.browse_root_status().into_iter().filter_map(|(p, why)| why.map(|w| serde_json::json!({"path": p.to_string_lossy(), "reason": w}))).collect();
             return Ok(serde_json::json!({"path": "", "parent": null, "skipped": skipped, "entries": roots.iter().map(|r| serde_json::json!({"name": r.to_string_lossy(), "path": r.to_string_lossy(), "dir": true, "size": 0})).collect::<Vec<_>>()}));
         }
-        let dir = cfg.pick_path(std::path::Path::new(path))?;
+        let dir = if archive {
+            let c = std::path::Path::new(path).canonicalize()?;
+            if !roots.iter().any(|r| c.starts_with(r)) {
+                bail!("{path} is outside the local backup folder");
+            }
+            c
+        } else {
+            cfg.pick_path(std::path::Path::new(path))?
+        };
         let mut entries = Vec::new();
         for e in std::fs::read_dir(&dir)? {
             let e = e?;
             let ft = e.file_type()?;
             let name = e.file_name().to_string_lossy().into_owned();
-            if ft.is_symlink() || name.starts_with('.') || !(ft.is_dir() || ft.is_file()) {
+            if ft.is_symlink() || name.starts_with('.') || !(ft.is_dir() || (ft.is_file() && !archive)) {
                 continue;
             }
             let size = if ft.is_file() { e.metadata().map(|m| m.len()).unwrap_or(0) } else { 0 };

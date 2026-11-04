@@ -42,6 +42,11 @@ h2{font-size:14px;color:var(--mut);margin:16px 0 4px}
 <div class="row"><b id="selcount"></b><button id="savesel" class="p">Save selection</button><span id="selmsg"></span></div>
 <div id="chosen" class="list small"></div>
 </div>
+<h2>Convert / zip selection (task 3)</h2>
+<div class="row"><button id="aup">&uarr; Up</button><code id="ahere"></code></div>
+<div id="alist" class="list"></div>
+<div class="row"><b id="acount"></b><button id="asave" class="p">Save choices</button><span id="amsg"></span></div>
+<p style="color:var(--mut);margin:0 0 8px">A choice on a year folder covers every project in it; a choice on a project overrides it. Folders without a choice are left alone (config default: <b id="adef"></b>).</p>
 <h2>Schedule</h2><div id="sched"></div>
 <h2>Settings <small id="cpath"></small></h2>
 <textarea id="cfg" spellcheck="false"></textarea>
@@ -75,6 +80,22 @@ async function loadCfg(){const r=await (await fetch("/api/config")).json();
 $("reload").onclick=loadCfg;
 $("save").onclick=async()=>{const r=await (await fetch("/api/config",{method:"POST",headers:{"X-Vault":"1"},body:$("cfg").value})).json();
  $("cmsg").className=r.error?"err":"";$("cmsg").textContent=r.error?r.error:("Saved and applied"+(r.note?". "+r.note:""));tick()};
+let rules=new Map(),acur="",aparent=null,aents=[],adefault="none";
+const MODES=[["","\u2014 (inherit)"],["none","skip"],["convert","convert"],["convert_zip","convert + zip"]];
+function inherited(p){let best=null,bl=-1;for(const [rp,m] of rules){if((p===rp||p.startsWith(rp+"/"))&&rp.length>bl&&p!==rp){best=m;bl=rp.length}}return best}
+function drawA(){$("ahere").textContent=acur;$("aup").disabled=!aparent;$("adef").textContent=adefault;
+ $("acount").textContent=rules.size+" choice(s)";
+ $("alist").innerHTML=aents.map((e,i)=>`<label><a data-d="${i}">&#128193; ${esc(e.name)}</a><span class="sz"><select data-i="${i}">${MODES.map(([v,l])=>`<option value="${v}" ${(rules.get(e.path)||"")===v?"selected":""}>${l}</option>`).join("")}</select>${!rules.has(e.path)&&inherited(e.path)?" <small>inherits: "+inherited(e.path)+"</small>":""}</span></label>`).join("")||"<label>No folders</label>";
+ $("alist").querySelectorAll("select").forEach(x=>x.onchange=()=>{const p=aents[x.dataset.i].path;x.value?rules.set(p,x.value):rules.delete(p);drawA()});
+ $("alist").querySelectorAll("a").forEach(a=>a.onclick=ev=>{ev.preventDefault();abrowse(aents[a.dataset.d].path)})}
+async function abrowse(p){const r=await (await fetch("/api/browse?scope=archive&path="+encodeURIComponent(p))).json();
+ if(r.error){$("amsg").textContent=r.error;$("amsg").className="err";return}
+ $("amsg").textContent="";$("amsg").className="";acur=r.path;aparent=r.parent;aents=r.entries;drawA()}
+$("aup").onclick=()=>aparent&&abrowse(aparent);
+$("asave").onclick=async()=>{const body=[...rules].map(([path,mode])=>({path,mode}));
+ const r=await (await fetch("/api/rules",{method:"POST",headers:{"X-Vault":"1"},body:JSON.stringify(body)})).json();
+ $("amsg").className=r.error?"err":"";$("amsg").textContent=r.error||"Saved";if(!r.error)loadCfg()};
+(async()=>{const r=await (await fetch("/api/rules")).json();adefault=r.default;r.rules.forEach(x=>rules.set(x.path,x.mode));abrowse("")})();
 let skipped=[],sel=new Set(),cur="",parent=null,ents=[];
 const esc=s=>s.replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 function drawSel(){$("selcount").textContent=sel.size+" selected";

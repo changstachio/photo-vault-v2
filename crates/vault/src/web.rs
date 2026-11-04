@@ -36,11 +36,25 @@ pub fn serve(app: Arc<App>) -> Result<()> {
                 Ok(t) => json(serde_json::json!({"path": app.cfg_path.display().to_string(), "text": t}), 200),
                 Err(e) => json(serde_json::json!({"error": e.to_string()}), 500),
             },
-            (Method::Get, "/api/browse") => match app.browse(&crate::util::url_decode(param(q, "path").unwrap_or(""))) {
+            (Method::Get, "/api/browse") => match app.browse(&crate::util::url_decode(param(q, "path").unwrap_or("")), param(q, "scope") == Some("archive")) {
                 Ok(v) => json(v, 200),
                 Err(e) => json(serde_json::json!({"error": format!("{e:#}")}), 400),
             },
             (Method::Get, "/api/sources") => json(serde_json::json!({"sources": app.cfg().sync.sources.iter().map(|s| serde_json::json!({"path": s.path.to_string_lossy(), "label": s.label})).collect::<Vec<_>>()}), 200),
+            (Method::Get, "/api/rules") => json(serde_json::json!({"default": app.cfg().archive.default.as_str(), "rules": app.cfg().archive.rules.iter().map(|r| serde_json::json!({"path": r.path.to_string_lossy(), "mode": r.mode.as_str()})).collect::<Vec<_>>()}), 200),
+            (Method::Post, "/api/rules") => {
+                if !req.headers().iter().any(|h| h.field.equiv("X-Vault")) {
+                    json(serde_json::json!({"error": "missing X-Vault header"}), 403)
+                } else {
+                    match read_body(&mut req).and_then(|b| serde_json::from_str::<Vec<crate::config::Rule>>(&b).ok()) {
+                        None => json(serde_json::json!({"error": "expected a JSON list of {path, mode}"}), 400),
+                        Some(list) => match app.set_archive_rules(list) {
+                            Ok(_) => json(serde_json::json!({"ok": true}), 200),
+                            Err(e) => json(serde_json::json!({"error": format!("{e:#}")}), 400),
+                        },
+                    }
+                }
+            }
             (Method::Post, "/api/sources") => {
                 if !req.headers().iter().any(|h| h.field.equiv("X-Vault")) {
                     json(serde_json::json!({"error": "missing X-Vault header"}), 403)

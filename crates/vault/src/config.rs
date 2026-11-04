@@ -100,9 +100,44 @@ impl std::str::FromStr for ExistingJpg {
     }
 }
 
+/// What `archive` does to a project folder.
+#[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ArchiveMode {
+    /// Leave the folder alone.
+    #[default]
+    None,
+    /// ARW to JPG, delete the ARW; no zip.
+    Convert,
+    /// ARW to JPG, then zip the folder if only JPGs remain.
+    ConvertZip,
+}
+
+impl ArchiveMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Convert => "convert",
+            Self::ConvertZip => "convert_zip",
+        }
+    }
+}
+
+/// Applies to the folder and everything under it; the deepest matching rule wins.
+#[derive(Deserialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct Rule {
+    pub path: PathBuf,
+    pub mode: ArchiveMode,
+}
+
 #[derive(Deserialize, Clone, Debug)]
 #[serde(deny_unknown_fields, default)]
 pub struct Archive {
+    /// Mode for projects no rule matches. `none` means nothing is touched until you choose folders.
+    pub default: ArchiveMode,
+    #[serde(rename = "rule")]
+    pub rules: Vec<Rule>,
     pub existing_jpg: ExistingJpg,
     pub threads: usize,
     pub demosaic: i32,
@@ -113,7 +148,7 @@ pub struct Archive {
 impl Default for Archive {
     fn default() -> Self {
         let n = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-        Self { existing_jpg: ExistingJpg::Rename, threads: (n / 2).max(1), demosaic: 3, colour: ColourMode::Preserve, render: Render::default() }
+        Self { default: ArchiveMode::None, rules: vec![], existing_jpg: ExistingJpg::Rename, threads: (n / 2).max(1), demosaic: 3, colour: ColourMode::Preserve, render: Render::default() }
     }
 }
 
@@ -166,6 +201,18 @@ pub fn parse_day(s: &str) -> Result<chrono::Weekday> {
 }
 
 impl Config {
+    /// Mode for a project folder: the rule on the deepest folder containing it, else `archive.default`.
+    pub fn archive_mode(&self, project: &Path) -> ArchiveMode {
+        let proj = project.canonicalize().unwrap_or_else(|_| project.to_path_buf());
+        self.archive
+            .rules
+            .iter()
+            .filter(|r| proj.starts_with(r.path.canonicalize().unwrap_or_else(|_| r.path.clone())))
+            .max_by_key(|r| r.path.components().count())
+            .map(|r| r.mode)
+            .unwrap_or(self.archive.default)
+    }
+
     /// Why each configured picker folder is or is not usable (None = usable).
     pub fn browse_root_status(&self) -> Vec<(PathBuf, Option<String>)> {
         let list: Vec<&PathBuf> = if self.web.browse_roots.is_empty() { vec![&self.paths.ingest, &self.paths.local_backup] } else { self.web.browse_roots.iter().collect() };
@@ -223,6 +270,9 @@ impl Config {
         }
         for r in &self.web.browse_roots {
             abs("web.browse_roots", r)?;
+        }
+        for r in &self.archive.rules {
+            abs("archive.rule path", &r.path)?;
         }
         for src in &self.sync.sources {
             abs("sync.source path", &src.path)?;
@@ -294,12 +344,17 @@ min_idle_minutes = 30                       # skip projects touched more recentl
 threads = 4
 
 [archive]                                   # part 3: ARW -> JPG, then zip JPG-only projects
+default = "none"                            # projects without a rule: none | convert | convert_zip. Choose folders in the web UI.
 threads = 4
 existing_jpg = "rename"                   # ARW with a same-name JPG: rename | use_existing (delete the ARW, no conversion) | overwrite
 demosaic = 3
 colour = "preserve"                         # preserve | srgb | adobergb | prophoto
 [archive.render]
 quality = 100
+
+# [[archive.rule]]                          # normally written by the web UI
+# path = "/mnt/backup/Sony Backup/2015"     # applies to everything under this folder; the deepest rule wins
+# mode = "convert_zip"
 
 [web]
 enabled = true

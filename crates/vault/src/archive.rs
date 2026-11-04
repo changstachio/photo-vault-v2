@@ -5,7 +5,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
-use crate::config::{Config, ExistingJpg};
+use crate::config::{ArchiveMode, Config, ExistingJpg};
 use crate::job::Ctx;
 use crate::util::*;
 
@@ -37,19 +37,24 @@ pub fn run(cfg: &Config, ctx: &Ctx, limit: Option<usize>) -> Result<()> {
         ps.sort();
         projects.extend(ps.into_iter().map(|(_, p)| p));
     }
+    let total = projects.len();
+    let mut projects: Vec<(PathBuf, ArchiveMode)> = projects.into_iter().map(|p| { let m = cfg.archive_mode(&p); (p, m) }).filter(|(_, m)| *m != ArchiveMode::None).collect();
     if let Some(n) = limit {
         projects.truncate(n);
     }
-    ctx.log(format!("{} project folder(s) to examine, oldest first", projects.len()));
+    ctx.log(format!("{} of {total} project folder(s) selected for archiving, oldest first", projects.len()));
+    if projects.is_empty() {
+        ctx.log("nothing selected: choose folders under \"Convert / zip selection\" or set archive.default");
+    }
     ctx.reset_progress(projects.len() as u64, 0);
     let pool = rayon::ThreadPoolBuilder::new().num_threads(cfg.archive.threads).build()?;
     let problems = AtomicU32::new(0);
-    for p in projects {
+    for (p, mode) in projects {
         if ctx.cancelled() {
             ctx.log("cancelled");
             break;
         }
-        if let Err(e) = pool.install(|| project(cfg, ctx, &p)) {
+        if let Err(e) = pool.install(|| project(cfg, ctx, &p, mode)) {
             problems.fetch_add(1, Relaxed);
             ctx.log(format!("{}: FAILED: {e:#}", p.display()));
         }
@@ -63,14 +68,14 @@ pub fn run(cfg: &Config, ctx: &Ctx, limit: Option<usize>) -> Result<()> {
     Ok(())
 }
 
-fn project(cfg: &Config, ctx: &Ctx, dir: &Path) -> Result<()> {
+fn project(cfg: &Config, ctx: &Ctx, dir: &Path, mode: ArchiveMode) -> Result<()> {
     let name = dir.file_name().unwrap().to_string_lossy().into_owned();
     let files = list_files(dir)?;
     let arws: Vec<&FileInfo> = files.iter().filter(|f| ext_lower(&f.abs) == "arw").collect();
     if !arws.is_empty() {
         ctx.log(format!("{name}: {} ARW file(s) to convert", arws.len()));
         if ctx.dry {
-            return finish_dry(ctx, &name, &files, arws.len());
+            return finish_dry(ctx, &name, &files, arws.len(), mode);
         }
         let errs: Vec<String> = arws.par_iter().filter_map(|f| convert_one(cfg, ctx, f).err().map(|e| format!("{}: {e:#}", f.rel.display()))).collect();
         if !errs.is_empty() {
@@ -79,6 +84,9 @@ fn project(cfg: &Config, ctx: &Ctx, dir: &Path) -> Result<()> {
             }
             bail!("{} conversion(s) failed; folder left as is", errs.len());
         }
+    }
+    if mode == ArchiveMode::Convert {
+        return Ok(());
     }
     let files = list_files(dir)?;
     let only_jpg = !files.is_empty() && files.iter().all(|f| matches!(ext_lower(&f.abs).as_str(), "jpg" | "jpeg"));
@@ -97,8 +105,8 @@ fn project(cfg: &Config, ctx: &Ctx, dir: &Path) -> Result<()> {
     zip_folder(ctx, dir, &name, &files)
 }
 
-fn finish_dry(ctx: &Ctx, name: &str, files: &[FileInfo], arws: usize) -> Result<()> {
-    if files.len() == arws || files.iter().all(|f| matches!(ext_lower(&f.abs).as_str(), "arw" | "jpg" | "jpeg")) {
+fn finish_dry(ctx: &Ctx, name: &str, files: &[FileInfo], arws: usize, mode: ArchiveMode) -> Result<()> {
+    if mode == ArchiveMode::ConvertZip && files.len() == arws || files.iter().all(|f| matches!(ext_lower(&f.abs).as_str(), "arw" | "jpg" | "jpeg")) {
         ctx.log(format!("{name}: would then zip and remove the folder"));
     }
     Ok(())
