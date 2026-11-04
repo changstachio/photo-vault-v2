@@ -61,7 +61,7 @@ h2{font-size:14px;color:var(--mut);margin:16px 0 4px}
 <h2>Daemon events</h2><pre id="ev" style="height:100px"></pre>
 </main>
 <script>
-const T=[["sync","1 · Sync to network share"],["ingest","2 · Ingest to local backup"],["archive","3 · Convert + zip"],["dates","4 · Check years"],["shrink","5 · Shrink JPGs"]];
+const T=[["sync","1 · Sync to network share"],["ingest","2 · Ingest to local backup"],["archive","3 · Convert + zip"],["dates","4 · Check years"],["shrink","5 · Shrink JPGs"],["repair","6 · Repair JPGs"]];
 const $=id=>document.getElementById(id);
 const post=(u)=>fetch(u,{method:"POST",headers:{"X-Vault":"1"}}).then(r=>r.json());
 T.forEach(([t,l])=>{const b=document.createElement("button");b.textContent=l;b.className="p";b.dataset.t=t;

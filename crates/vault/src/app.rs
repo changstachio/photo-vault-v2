@@ -28,6 +28,7 @@ pub fn run_task(cfg: &Config, task: &str, ctx: &Ctx, limit: Option<usize>) -> Re
         "archive" => crate::archive::run(cfg, ctx, limit),
         "dates" => crate::dates::run(cfg, ctx),
         "shrink" => crate::shrink::run(cfg, ctx),
+        "repair" => crate::repair::run(cfg, ctx),
         t => bail!("unknown task {t}"),
     }
 }

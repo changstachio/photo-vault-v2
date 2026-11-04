@@ -36,6 +36,12 @@ In the web UI, open a folder in *Convert / zip selection*, then press **Test on 
 
 Set a folder, a year or a `.zip` to **shrink JPGs** in *Convert / zip selection*, set the quality in *JPG size*, and run task 5 (`vault shrink`; `--dry-run` lists what it would do). For each selected zip it re-encodes every JPG at `archive.render.quality` / `chroma` and writes a new zip next to the original (`.name.zip.vshrink`). It keeps EXIF, XMP, ICC and file times; non-JPG files are copied through unchanged. The new zip is read back, every entry is compared, and shrunk JPGs must decode at the same pixel size. Only then does it replace the original. A JPG is re-encoded only if that makes it at least `archive.shrink_min_saving_percent` (default 5) smaller, otherwise the original bytes are kept; a zip whose total saving is below that is left untouched. Folders are handled in place the same way. Re-encoding a JPG is lossy (generation loss), so keep a copy until you are happy with the result, and test a setting first.
 
+## Task 6: repairing JPGs that show as green stripes
+
+Versions before this fix wrote 4:2:0 JPGs with optimised Huffman tables from jpeg-encoder 0.7. libjpeg-based programs show them correctly, but zune-jpeg, which many Rust-based image viewers use, decodes them as green/striped garbage. The pixel data is intact. `vault repair` (or button 6) checks every JPG under the local backup, including JPGs inside zips. It decodes each one with two decoders, and any file they disagree on is rewritten with `jpegtran -copy all -optimize`. That rewrite is lossless: the result must decode to identical pixels and both decoders must then agree, or the file is left alone. File times and metadata are kept. Needs `jpegtran`: `sudo apt install libjpeg-turbo-progs`. Use `--dry-run` to count affected files first.
+
+Every JPG this tool writes is now checked with both decoders against its source pixels before it is kept or anything is deleted, and 4:2:0 uses standard Huffman tables (about 5% larger).
+
 ## Choosing what task 3 touches
 
 In the web UI's *Convert / zip selection*, open the local backup folders and set each year or project to **skip**, **convert** (ARW to JPG, no zip) or **convert + zip**. A choice on a year folder covers its projects; a choice on a project overrides it. Folders with no choice use `archive.default`, which is `none`: nothing is converted, zipped or deleted until you choose. Saved as `[[archive.rule]]` entries (`path`, `mode`) in the config file.

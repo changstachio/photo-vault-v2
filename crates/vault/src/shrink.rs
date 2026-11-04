@@ -12,7 +12,7 @@ use crate::job::Ctx;
 use crate::util::*;
 
 /// JPGs larger than this are not loaded into memory for re-encoding (copied unchanged instead).
-const MAX_JPG: u64 = 64 << 20;
+pub(crate) const MAX_JPG: u64 = 64 << 20;
 
 struct Item {
     name: String,
@@ -27,7 +27,7 @@ struct Done {
     dims: Option<(u16, u16)>,
 }
 
-fn is_jpg(name: &str) -> bool {
+pub(crate) fn is_jpg(name: &str) -> bool {
     matches!(name.rsplit('.').next().map(|e| e.to_lowercase()).as_deref(), Some("jpg" | "jpeg"))
 }
 
@@ -37,6 +37,123 @@ fn opts(method: zip::CompressionMethod, mt: Option<zip::DateTime>) -> zip::write
         Some(d) => o.last_modified_time(d),
         None => o,
     }
+}
+
+/// Replacement for one JPG: `Some((new bytes, pixel size))`, or `None` to keep the original.
+pub(crate) type Transform<'a> = &'a (dyn Fn(&[u8]) -> Option<(Vec<u8>, (u16, u16))> + Sync);
+
+pub(crate) struct Rewrite {
+    pub orig_len: u64,
+    pub new_len: u64,
+    pub changed: usize,
+}
+
+fn flush(pool: &rayon::ThreadPool, batch: &mut Vec<Item>, zw: &mut zip::ZipWriter<File>, f: Transform, done: &mut Vec<Done>, changed: &mut usize) -> Result<()> {
+    if batch.is_empty() {
+        return Ok(());
+    }
+    let res: Vec<Option<(Vec<u8>, (u16, u16))>> = pool.install(|| batch.par_iter().map(|it| f(&it.data)).collect());
+    for (it, r) in batch.drain(..).zip(res) {
+        let (bytes, dims) = match r {
+            Some((b, d)) => {
+                *changed += 1;
+                (b, Some(d))
+            }
+            None => (it.data, None),
+        };
+        zw.start_file(it.name.clone(), opts(zip::CompressionMethod::Stored, it.mt))?;
+        zw.write_all(&bytes)?;
+        done.push(Done { name: it.name, hash: blake3::hash(&bytes), len: bytes.len() as u64, dims });
+    }
+    Ok(())
+}
+
+/// Rebuild `path` next to itself with JPG entries passed through `f` (everything else copied
+/// unchanged, names, order and times kept), read the new zip back and check every entry, then
+/// call `accept` to decide whether it replaces the original. The original is never modified
+/// before the new zip has been verified.
+pub(crate) fn rewrite_zip(ctx: &Ctx, pool: &rayon::ThreadPool, chunk: usize, path: &Path, f: Transform, accept: &dyn Fn(&Rewrite) -> bool) -> Result<Rewrite> {
+    let fname = path.file_name().unwrap().to_string_lossy().into_owned();
+    let orig_len = fs::metadata(path)?.len();
+    let mut za = zip::ZipArchive::new(BufReader::new(File::open(path)?)).with_context(|| format!("opening {fname}"))?;
+    let n = za.len();
+    let tmp = path.with_file_name(format!(".{fname}.vshrink"));
+    let r = (|| -> Result<Rewrite> {
+        let mut zw = zip::ZipWriter::new(File::create(&tmp)?);
+        let mut batch: Vec<Item> = Vec::new();
+        let mut done: Vec<Done> = Vec::new();
+        let mut changed = 0usize;
+        for i in 0..n {
+            if ctx.cancelled() {
+                bail!("cancelled");
+            }
+            let mut e = za.by_index(i)?;
+            let name = e.name()?.to_string();
+            let mt = e.last_modified();
+            if e.is_dir() {
+                flush(pool, &mut batch, &mut zw, f, &mut done, &mut changed)?;
+                zw.add_directory(name, opts(zip::CompressionMethod::Stored, mt))?;
+                continue;
+            }
+            ctx.add_bytes(e.compressed_size());
+            if is_jpg(&name) && e.size() <= MAX_JPG {
+                let mut data = Vec::with_capacity(e.size() as usize);
+                e.read_to_end(&mut data)?;
+                batch.push(Item { name, mt, data });
+                if batch.len() >= chunk.max(1) {
+                    flush(pool, &mut batch, &mut zw, f, &mut done, &mut changed)?;
+                }
+            } else {
+                // Not a JPG (or too big to hold in memory): copied through unchanged, order kept.
+                flush(pool, &mut batch, &mut zw, f, &mut done, &mut changed)?;
+                let method = if e.compression() == zip::CompressionMethod::Stored { zip::CompressionMethod::Stored } else { zip::CompressionMethod::Deflated };
+                zw.start_file(name.clone(), opts(method, mt))?;
+                let (mut h, mut len, mut buf) = (blake3::Hasher::new(), 0u64, vec![0u8; 1 << 20]);
+                loop {
+                    let k = e.read(&mut buf)?;
+                    if k == 0 {
+                        break;
+                    }
+                    h.update(&buf[..k]);
+                    zw.write_all(&buf[..k])?;
+                    len += k as u64;
+                }
+                done.push(Done { name, hash: h.finalize(), len, dims: None });
+            }
+        }
+        flush(pool, &mut batch, &mut zw, f, &mut done, &mut changed)?;
+        zw.finish()?.sync_all()?;
+
+        let mut zv = zip::ZipArchive::new(BufReader::new(File::open(&tmp)?))?;
+        if zv.len() != n {
+            bail!("new zip has {} entries, expected {n}", zv.len());
+        }
+        for d in &done {
+            let mut e = zv.by_name(&d.name).with_context(|| format!("{} missing from new zip", d.name))?;
+            let mut bytes = Vec::new();
+            e.read_to_end(&mut bytes)?; // the zip reader checks the CRC
+            if bytes.len() as u64 != d.len || blake3::hash(&bytes) != d.hash {
+                bail!("{} differs in new zip", d.name);
+            }
+            if let Some((w, h)) = d.dims {
+                let info = vault_raw::probe_decode_bytes(&bytes).with_context(|| format!("{} does not decode", d.name))?;
+                if info.width != w as u32 || info.height != h as u32 {
+                    bail!("{} changed size", d.name);
+                }
+            }
+        }
+        let rw = Rewrite { orig_len, new_len: fs::metadata(&tmp)?.len(), changed };
+        if rw.changed > 0 && accept(&rw) {
+            fs::rename(&tmp, path)?;
+        } else {
+            let _ = fs::remove_file(&tmp);
+        }
+        Ok(rw)
+    })();
+    if r.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    r
 }
 
 /// Task 5: re-encode the JPGs inside the folders and zips chosen as `shrink`, at the configured
@@ -85,111 +202,23 @@ pub fn run(cfg: &Config, ctx: &Ctx) -> Result<()> {
     Ok(())
 }
 
-fn flush(pool: &rayon::ThreadPool, batch: &mut Vec<Item>, zw: &mut zip::ZipWriter<File>, q: u8, ch: Chroma, min: f32, done: &mut Vec<Done>) -> Result<()> {
-    if batch.is_empty() {
-        return Ok(());
-    }
-    let res: Vec<Option<(Vec<u8>, u16, u16)>> = pool.install(|| batch.par_iter().map(|it| recompress(&it.data, q, ch).ok()).collect());
-    for (it, r) in batch.drain(..).zip(res) {
-        let limit = it.data.len() as f64 * (1.0 - min as f64 / 100.0);
-        let (bytes, dims) = match r {
-            Some((b, w, h)) if (b.len() as f64) <= limit => (b, Some((w, h))),
-            _ => (it.data, None),
-        };
-        zw.start_file(it.name.clone(), opts(zip::CompressionMethod::Stored, it.mt))?;
-        zw.write_all(&bytes)?;
-        done.push(Done { name: it.name, hash: blake3::hash(&bytes), len: bytes.len() as u64, dims });
-    }
-    Ok(())
-}
-
 fn shrink_zip(cfg: &Config, ctx: &Ctx, pool: &rayon::ThreadPool, path: &Path) -> Result<u64> {
     let (q, ch, min) = (cfg.archive.render.quality, cfg.archive.render.chroma, cfg.archive.shrink_min_saving_percent);
     let fname = path.file_name().unwrap().to_string_lossy().into_owned();
-    let orig_len = fs::metadata(path)?.len();
-    let mut za = zip::ZipArchive::new(BufReader::new(File::open(path)?)).with_context(|| format!("opening {fname}"))?;
-    let n = za.len();
-    let tmp = path.with_file_name(format!(".{fname}.vshrink"));
-    let r = (|| -> Result<u64> {
-        let mut zw = zip::ZipWriter::new(File::create(&tmp)?);
-        let mut batch: Vec<Item> = Vec::new();
-        let mut done: Vec<Done> = Vec::new();
-        let chunk = cfg.archive.threads * 2;
-        for i in 0..n {
-            if ctx.cancelled() {
-                bail!("cancelled");
-            }
-            let mut e = za.by_index(i)?;
-            let name = e.name()?.to_string();
-            let mt = e.last_modified();
-            if e.is_dir() {
-                flush(pool, &mut batch, &mut zw, q, ch, min, &mut done)?;
-                zw.add_directory(name, opts(zip::CompressionMethod::Stored, mt))?;
-                continue;
-            }
-            ctx.add_bytes(e.compressed_size());
-            if is_jpg(&name) && e.size() <= MAX_JPG {
-                let mut data = Vec::with_capacity(e.size() as usize);
-                e.read_to_end(&mut data)?;
-                batch.push(Item { name, mt, data });
-                if batch.len() >= chunk {
-                    flush(pool, &mut batch, &mut zw, q, ch, min, &mut done)?;
-                }
-            } else {
-                // Not a JPG (or too big to hold in memory): copied through unchanged, order kept.
-                flush(pool, &mut batch, &mut zw, q, ch, min, &mut done)?;
-                let method = if e.compression() == zip::CompressionMethod::Stored { zip::CompressionMethod::Stored } else { zip::CompressionMethod::Deflated };
-                zw.start_file(name.clone(), opts(method, mt))?;
-                let (mut h, mut len, mut buf) = (blake3::Hasher::new(), 0u64, vec![0u8; 1 << 20]);
-                loop {
-                    let k = e.read(&mut buf)?;
-                    if k == 0 {
-                        break;
-                    }
-                    h.update(&buf[..k]);
-                    zw.write_all(&buf[..k])?;
-                    len += k as u64;
-                }
-                done.push(Done { name, hash: h.finalize(), len, dims: None });
-            }
-        }
-        flush(pool, &mut batch, &mut zw, q, ch, min, &mut done)?;
-        zw.finish()?.sync_all()?;
-
-        // Read the new zip back: every entry must match what was written, and shrunk JPGs must decode at the same size.
-        let mut zv = zip::ZipArchive::new(BufReader::new(File::open(&tmp)?))?;
-        if zv.len() != n {
-            bail!("new zip has {} entries, expected {n}", zv.len());
-        }
-        for d in &done {
-            let mut e = zv.by_name(&d.name).with_context(|| format!("{} missing from new zip", d.name))?;
-            let mut bytes = Vec::new();
-            e.read_to_end(&mut bytes)?; // the zip reader checks the CRC
-            if bytes.len() as u64 != d.len || blake3::hash(&bytes) != d.hash {
-                bail!("{} differs in new zip", d.name);
-            }
-            if let Some((w, h)) = d.dims {
-                let info = vault_raw::probe_decode_bytes(&bytes).with_context(|| format!("{} does not decode", d.name))?;
-                if info.width != w as u32 || info.height != h as u32 {
-                    bail!("{} changed size", d.name);
-                }
-            }
-        }
-        let new_len = fs::metadata(&tmp)?.len();
-        let pct = 100.0 * orig_len.saturating_sub(new_len) as f64 / orig_len.max(1) as f64;
-        if new_len >= orig_len || pct < min as f64 {
-            ctx.log(format!("{fname}: {} -> {} ({pct:.1}% smaller), below {min}%: left unchanged", fmt_bytes(orig_len), fmt_bytes(new_len)));
-            let _ = fs::remove_file(&tmp);
-            return Ok(0);
-        }
-        fs::rename(&tmp, path)?;
-        ctx.log(format!("{fname}: {} -> {} ({pct:.0}% smaller)", fmt_bytes(orig_len), fmt_bytes(new_len)));
-        Ok(orig_len - new_len)
-    })();
-    if r.is_err() {
-        let _ = fs::remove_file(&tmp);
+    let f = move |data: &[u8]| -> Option<(Vec<u8>, (u16, u16))> {
+        let limit = data.len() as f64 * (1.0 - min as f64 / 100.0);
+        recompress(data, q, ch).ok().filter(|(b, _, _)| (b.len() as f64) <= limit).map(|(b, w, h)| (b, (w, h)))
+    };
+    let pct = |r: &Rewrite| 100.0 * r.orig_len.saturating_sub(r.new_len) as f64 / r.orig_len.max(1) as f64;
+    let accept = |r: &Rewrite| r.new_len < r.orig_len && pct(r) >= min as f64;
+    let r = rewrite_zip(ctx, pool, cfg.archive.threads * 2, path, &f, &accept)?;
+    if r.changed > 0 && accept(&r) {
+        ctx.log(format!("{fname}: {} -> {} ({:.0}% smaller)", fmt_bytes(r.orig_len), fmt_bytes(r.new_len), pct(&r)));
+        Ok(r.orig_len - r.new_len)
+    } else {
+        ctx.log(format!("{fname}: {} -> {} ({:.1}% smaller), below {min}%: left unchanged", fmt_bytes(r.orig_len), fmt_bytes(r.new_len), pct(&r)));
+        Ok(0)
     }
-    r
 }
 
 fn shrink_dir(cfg: &Config, ctx: &Ctx, pool: &rayon::ThreadPool, dir: &Path) -> Result<u64> {

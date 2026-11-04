@@ -12,3 +12,4 @@ jpeg-encoder = { version = "0.7", features = ["simd"] }
 kamadak-exif = "0.6"
 serde = { version = "1", features = ["derive"] }
 libraw-lite = { path = "../libraw-lite" }
+zune-jpeg = "0.5"

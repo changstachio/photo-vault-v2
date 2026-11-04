@@ -100,12 +100,7 @@ fn render_pixels(arw: &Path, mode: ColourMode, demosaic: i32, render: &Render) -
 fn encode_rendered(r: &Rendered, quality: u8, chroma: Chroma) -> Result<Vec<u8>> {
     let mut jpg = Vec::with_capacity(r.px.len() / 4);
     let mut enc = Encoder::new(&mut jpg, quality.clamp(1, 100));
-    enc.set_sampling_factor(match chroma {
-        Chroma::C444 => SamplingFactor::R_4_4_4,
-        Chroma::C422 => SamplingFactor::R_4_2_2,
-        Chroma::C420 => SamplingFactor::R_4_2_0,
-    });
-    enc.set_optimized_huffman_tables(true);
+    set_sampling(&mut enc, chroma);
     enc.add_icc_profile(&icc::profile(r.space)).map_err(|e| anyhow::anyhow!("icc: {e}"))?;
     if let Some(x) = &r.exif {
         let _ = enc.add_exif_metadata(x);
@@ -114,10 +109,107 @@ fn encode_rendered(r: &Rendered, quality: u8, chroma: Chroma) -> Result<Vec<u8>>
     Ok(jpg)
 }
 
+/// Chroma subsampling plus Huffman table choice. jpeg-encoder 0.7's optimised Huffman tables
+/// combined with vertically subsampled chroma (4:2:0) produce files that libjpeg reads correctly
+/// but zune-jpeg (used by many image viewers) decodes as garbage, so 4:2:0 uses the standard tables.
+pub(crate) fn set_sampling<W: jpeg_encoder::JfifWrite>(enc: &mut Encoder<W>, chroma: Chroma) {
+    enc.set_sampling_factor(match chroma {
+        Chroma::C444 => SamplingFactor::R_4_4_4,
+        Chroma::C422 => SamplingFactor::R_4_2_2,
+        Chroma::C420 => SamplingFactor::R_4_2_0,
+    });
+    enc.set_optimized_huffman_tables(chroma != Chroma::C420);
+}
+
+fn mean_abs_diff(a: &[u8], b: &[u8]) -> f64 {
+    let (mut sum, mut n) = (0u64, 0u64);
+    for i in (0..a.len().min(b.len())).step_by(7) {
+        sum += (a[i] as i32 - b[i] as i32).unsigned_abs() as u64;
+        n += 1;
+    }
+    sum as f64 / n.max(1) as f64
+}
+
+fn zune_decode(jpg: &[u8]) -> Result<Vec<u8>> {
+    let mut d = zune_jpeg::JpegDecoder::new(zune_jpeg::zune_core::bytestream::ZCursor::new(jpg));
+    d.decode().map_err(|e| anyhow::anyhow!("{e:?}"))
+}
+
+fn ref_decode(jpg: &[u8]) -> Result<Vec<u8>> {
+    let mut d = jpeg_decoder::Decoder::new(jpg);
+    d.decode().map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// Largest mean per-channel error accepted between a decoded JPG and the pixels it was made from.
+/// Normal JPEG loss is a few units even at low quality; a broken file is 50-120.
+const MAX_MEAN_ERROR: f64 = 20.0;
+
+/// Decode `jpg` with two independent decoders (jpeg-decoder and zune-jpeg) and require both to
+/// match `src` (the pixels it was encoded from). Catches files that some viewers show wrongly.
+pub fn verify_against(jpg: &[u8], src: &[u8]) -> Result<()> {
+    for (name, px) in [("jpeg-decoder", ref_decode(jpg)), ("zune-jpeg", zune_decode(jpg))] {
+        let px = px.with_context(|| format!("{name} cannot decode the new JPG"))?;
+        if px.len() != src.len() {
+            bail!("{name} decodes the new JPG to {} bytes, expected {}", px.len(), src.len());
+        }
+        let e = mean_abs_diff(&px, src);
+        if e > MAX_MEAN_ERROR {
+            bail!("{name} decodes the new JPG wrongly (mean error {e:.1}); not written");
+        }
+    }
+    Ok(())
+}
+
+/// True if the two decoders disagree on `jpg` (a file some viewers show as garbage).
+pub fn decoders_disagree(jpg: &[u8]) -> Result<bool> {
+    let a = ref_decode(jpg)?;
+    let b = zune_decode(jpg)?;
+    Ok(a.len() != b.len() || mean_abs_diff(&a, &b) > MAX_MEAN_ERROR)
+}
+
+/// Pixels as decoded by jpeg-decoder (matches libjpeg); used to prove a repair is lossless.
+pub fn reference_pixels(jpg: &[u8]) -> Result<Vec<u8>> {
+    ref_decode(jpg)
+}
+
+/// Baseline JPG whose chroma is subsampled vertically: the only kind the encoder bug produced.
+pub fn vertically_subsampled_baseline(j: &[u8]) -> bool {
+    if j.len() < 4 || j[0] != 0xFF || j[1] != 0xD8 {
+        return false;
+    }
+    let mut i = 2;
+    while i + 4 <= j.len() && j[i] == 0xFF {
+        let m = j[i + 1];
+        if m == 0xFF {
+            i += 1;
+            continue;
+        }
+        if m == 0xDA || m == 0xD9 {
+            return false;
+        }
+        let len = u16::from_be_bytes([j[i + 2], j[i + 3]]) as usize;
+        if len < 2 || i + 2 + len > j.len() {
+            return false;
+        }
+        if m == 0xC0 || m == 0xC1 {
+            // SOFn: P(1) Y(2) X(2) Nf(1), then per component: id, HiVi, Tq
+            let s = &j[i + 4..i + 2 + len];
+            if s.len() < 9 || s[5] < 3 {
+                return false;
+            }
+            let (hv_y, hv_cb) = (s[7], s[10]);
+            return (hv_y & 0x0F) > (hv_cb & 0x0F);
+        }
+        i += 2 + len;
+    }
+    false
+}
+
 /// Render `arw` to JPG bytes in memory without touching the disk.
 pub fn render_jpg(arw: &Path, mode: ColourMode, demosaic: i32, render: &Render) -> Result<(Converted, Vec<u8>)> {
     let r = render_pixels(arw, mode, demosaic, render)?;
     let jpg = encode_rendered(&r, render.quality, render.chroma)?;
+    verify_against(&jpg, &r.px)?;
     let hash = *blake3::hash(&jpg).as_bytes();
     let size = jpg.len() as u64;
     Ok((Converted { width: r.w, height: r.h, size, hash, space: r.space }, jpg))
@@ -190,6 +282,17 @@ pub fn thumbnail(p: &Path, max: u16) -> Result<(usize, usize, Vec<u8>)> {
         _ => bail!("unsupported pixel format"),
     };
     Ok((i.width as usize, i.height as usize, rgb))
+}
+
+/// Test helper: a JPG encoded with the settings that triggered the jpeg-encoder bug.
+#[doc(hidden)]
+pub fn test_buggy_jpg(px: &[u8], w: u16, h: u16) -> Vec<u8> {
+    let mut b = Vec::new();
+    let mut e = Encoder::new(&mut b, 90);
+    e.set_sampling_factor(SamplingFactor::R_4_2_0);
+    e.set_optimized_huffman_tables(true);
+    e.encode(px, w, h, ColorType::Rgb).unwrap();
+    b
 }
 
 #[doc(hidden)]

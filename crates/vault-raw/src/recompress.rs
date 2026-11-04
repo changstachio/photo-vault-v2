@@ -1,9 +1,9 @@
 use anyhow::{bail, Context, Result};
-use jpeg_encoder::{ColorType, Encoder, SamplingFactor};
+use jpeg_encoder::{ColorType, Encoder};
 
 use crate::Chroma;
 
-/// Metadata segments (EXIF, XMP, ICC, IPTC...) of a JPG, in file order: (APPn number, payload).
+/// Metadata segments worth keeping (EXIF, XMP, ICC, IPTC) of a JPG, in file order: (APPn number, payload).
 fn app_segments(j: &[u8]) -> Vec<(u8, Vec<u8>)> {
     let mut out = Vec::new();
     if j.len() < 4 || j[0] != 0xFF || j[1] != 0xD8 {
@@ -23,21 +23,32 @@ fn app_segments(j: &[u8]) -> Vec<(u8, Vec<u8>)> {
         if len < 2 || i + 2 + len > j.len() {
             break;
         }
-        if (0xE1..=0xEF).contains(&m) {
-            out.push((m - 0xE0, j[i + 4..i + 2 + len].to_vec()));
+        let data = &j[i + 4..i + 2 + len];
+        // Keep EXIF/XMP (APP1), ICC (APP2 "ICC_PROFILE") and IPTC (APP13). Others are dropped: an
+        // Adobe APP14 colour-transform flag or an MPF index pointing at a gain map that is not
+        // carried over would make the new file display wrongly.
+        let keep = match m {
+            0xE1 | 0xED => true,
+            0xE2 => data.starts_with(b"ICC_PROFILE\0"),
+            _ => false,
+        };
+        if keep {
+            out.push((m - 0xE0, data.to_vec()));
         }
         i += 2 + len;
     }
     out
 }
 
-/// Re-encode a JPG at `quality`/`chroma`, keeping EXIF, XMP, ICC and IPTC segments unchanged.
+/// Re-encode a JPG at `quality`/`chroma`, keeping EXIF, XMP, ICC and IPTC segments unchanged, and
+/// verify the result with two decoders.
 /// Returns the new bytes and the pixel size. The caller decides whether the result is worth keeping.
 pub fn recompress(jpg: &[u8], quality: u8, chroma: Chroma) -> Result<(Vec<u8>, u16, u16)> {
     let mut d = jpeg_decoder::Decoder::new(jpg);
     let px = d.decode().map_err(|e| anyhow::anyhow!("{e}"))?;
     let info = d.info().context("no image info")?;
     let out = recompress_pixels(jpg, &px, &info, quality, chroma)?;
+    crate::verify_against(&out, &px)?;
     Ok((out, info.width, info.height))
 }
 
@@ -50,12 +61,7 @@ pub fn recompress_pixels(jpg: &[u8], px: &[u8], info: &jpeg_decoder::ImageInfo, 
     };
     let mut out = Vec::with_capacity(jpg.len());
     let mut enc = Encoder::new(&mut out, quality.clamp(1, 100));
-    enc.set_sampling_factor(match chroma {
-        Chroma::C444 => SamplingFactor::R_4_4_4,
-        Chroma::C422 => SamplingFactor::R_4_2_2,
-        Chroma::C420 => SamplingFactor::R_4_2_0,
-    });
-    enc.set_optimized_huffman_tables(true);
+    crate::set_sampling(&mut enc, chroma);
     for (n, data) in app_segments(jpg) {
         enc.add_app_segment(n, data).map_err(|e| anyhow::anyhow!("{e}"))?;
     }

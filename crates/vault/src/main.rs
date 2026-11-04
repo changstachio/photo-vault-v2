@@ -5,6 +5,7 @@ mod dates;
 mod ingest;
 mod job;
 mod preview;
+mod repair;
 mod shrink;
 mod sync;
 mod util;
@@ -43,6 +44,8 @@ enum Cmd {
     },
     /// 5: re-encode JPGs in the folders/zips chosen as "shrink" at the configured quality
     Shrink { #[arg(long)] dry_run: bool },
+    /// 6: find and losslessly repair JPGs that some viewers show as garbage (needs jpegtran)
+    Repair { #[arg(long)] dry_run: bool },
     /// 4: report (or with --apply, fix) projects sitting in the wrong year folder
     Dates { #[arg(long)] apply: bool },
     /// Run the scheduler and web UI (for systemd)
@@ -74,6 +77,7 @@ fn main() -> Result<()> {
             app::run_task(&cfg, "archive", &ctx, limit)?
         }
         Cmd::Shrink { dry_run } => app::run_task(&cfg, "shrink", &cli_ctx(dry_run, false), None)?,
+        Cmd::Repair { dry_run } => app::run_task(&cfg, "repair", &cli_ctx(dry_run, false), None)?,
         Cmd::Dates { apply } => app::run_task(&cfg, "dates", &cli_ctx(false, apply), None)?,
         Cmd::Daemon => {
             let a = app::App::new(cfg, path.clone());

@@ -615,3 +615,88 @@ fn preview_picks_random_arw_then_jpg_and_stays_inside_backup() {
     assert!(crate::preview::run(&c, &t.path().join("outside")).is_err());
     assert!(crate::preview::run(&c, &root.join("../outside")).is_err());
 }
+
+fn noisy_px(w: usize, h: usize) -> Vec<u8> {
+    let mut px = vec![0u8; w * h * 3];
+    let mut s = 7u32;
+    for y in 0..h {
+        for x in 0..w {
+            s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+            let n = (s >> 27) as u8;
+            let i = (y * w + x) * 3;
+            px[i] = ((x * 255 / w) as u8).saturating_add(n);
+            px[i + 1] = ((y * 255 / h) as u8).saturating_add(n);
+            px[i + 2] = (((x + y) / 5 % 256) as u8).saturating_add(n);
+        }
+    }
+    px
+}
+
+#[test]
+fn old_encoder_settings_are_detected_as_broken() {
+    let px = noisy_px(640, 480);
+    let bad = vault_raw::test_buggy_jpg(&px, 640, 480);
+    assert!(vault_raw::vertically_subsampled_baseline(&bad));
+    assert!(vault_raw::decoders_disagree(&bad).unwrap(), "zune-jpeg should misread the old 4:2:0 output");
+}
+
+#[test]
+fn new_420_output_decodes_the_same_in_both_decoders() {
+    let t = tempfile::tempdir().unwrap();
+    let dng = t.path().join("t.dng");
+    fs::write(&dng, vault_raw::testdng::make(640, 480)).unwrap();
+    for c in [vault_raw::Chroma::C420, vault_raw::Chroma::C422, vault_raw::Chroma::C444] {
+        let r = vault_raw::Render { quality: 85, chroma: c, ..Default::default() };
+        let (_, j) = vault_raw::render_jpg(&dng, vault_raw::ColourMode::Preserve, 3, &r).unwrap();
+        assert!(!vault_raw::decoders_disagree(&j).unwrap(), "{c:?} ARW conversion");
+    }
+    let px = noisy_px(640, 480);
+    let bad = vault_raw::test_buggy_jpg(&px, 640, 480);
+    let (re, _, _) = vault_raw::recompress::recompress(&bad, 80, vault_raw::Chroma::C420).unwrap();
+    assert!(!vault_raw::decoders_disagree(&re).unwrap(), "shrink output");
+}
+
+#[test]
+fn repair_fixes_broken_jpgs_losslessly_and_leaves_good_ones() {
+    let t = tempfile::tempdir().unwrap();
+    let c = cfg(t.path());
+    let px = noisy_px(640, 480);
+    let bad = vault_raw::test_buggy_jpg(&px, 640, 480);
+    let good = big_jpg(t.path(), "x");
+    let loose = t.path().join("local/2016/P/bad.jpg");
+    put(&loose, &bad, 2 * YEAR);
+    put(&t.path().join("local/2016/P/good.jpg"), &good, 2 * YEAR);
+    let mtime = fs::metadata(&loose).unwrap().modified().unwrap();
+    let zp = t.path().join("local/2016/Z.zip");
+    let mut z = zip::ZipWriter::new(fs::File::create(&zp).unwrap());
+    let st = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    z.start_file("Z/bad.jpg", st).unwrap();
+    std::io::Write::write_all(&mut z, &bad).unwrap();
+    z.start_file("Z/good.jpg", st).unwrap();
+    std::io::Write::write_all(&mut z, &good).unwrap();
+    z.finish().unwrap();
+
+    let ctx = Ctx::new(true, false, false);
+    crate::repair::run(&c, &ctx).unwrap();
+    assert!(ctx.lines().iter().any(|l| l.contains("2 broken JPG(s) found")), "{:?}", ctx.lines());
+    assert_eq!(fs::read(&loose).unwrap(), bad, "dry run changes nothing");
+
+    crate::repair::run(&c, &Ctx::new(false, false, false)).unwrap();
+    let fixed = fs::read(&loose).unwrap();
+    assert_ne!(fixed, bad);
+    assert!(!vault_raw::decoders_disagree(&fixed).unwrap());
+    assert_eq!(vault_raw::reference_pixels(&fixed).unwrap(), vault_raw::reference_pixels(&bad).unwrap(), "lossless");
+    assert_eq!(fs::metadata(&loose).unwrap().modified().unwrap(), mtime);
+    assert_eq!(fs::read(t.path().join("local/2016/P/good.jpg")).unwrap(), good, "good file untouched");
+    let mut z = zip::ZipArchive::new(fs::File::open(&zp).unwrap()).unwrap();
+    let mut b = Vec::new();
+    std::io::Read::read_to_end(&mut z.by_name("Z/bad.jpg").unwrap(), &mut b).unwrap();
+    assert!(!vault_raw::decoders_disagree(&b).unwrap());
+    let mut g = Vec::new();
+    std::io::Read::read_to_end(&mut z.by_name("Z/good.jpg").unwrap(), &mut g).unwrap();
+    assert_eq!(g, good);
+    // nothing left to do on a second run
+    let ctx = Ctx::new(false, false, false);
+    crate::repair::run(&c, &ctx).unwrap();
+    assert!(ctx.lines().iter().any(|l| l.contains("0 broken JPG(s) found")));
+}

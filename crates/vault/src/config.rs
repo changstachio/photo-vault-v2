@@ -190,7 +190,7 @@ pub struct Schedule {
     pub days: Vec<String>,
 }
 
-pub const TASKS: [&str; 5] = ["sync", "ingest", "archive", "dates", "shrink"];
+pub const TASKS: [&str; 6] = ["sync", "ingest", "archive", "dates", "shrink", "repair"];
 
 pub fn parse_hhmm(s: &str) -> Result<(u32, u32)> {
     let (h, m) = s.split_once(':').with_context(|| format!("bad time {s:?}, expected HH:MM"))?;
