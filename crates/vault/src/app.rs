@@ -134,6 +134,23 @@ impl App {
         self.save_config(&doc.to_string())
     }
 
+    /// Set JPEG quality and chroma subsampling in `[archive.render]`, keeping the rest of the file.
+    pub fn set_render(&self, quality: u8, chroma: vault_raw::Chroma) -> Result<Option<String>> {
+        use toml_edit::{value, DocumentMut, Item, Table};
+        let mut doc: DocumentMut = self.config_text()?.parse().map_err(|e| anyhow::anyhow!("config file does not parse: {e}"))?;
+        if !doc.contains_key("archive") {
+            doc["archive"] = Item::Table(Table::new());
+        }
+        let ar = doc["archive"].as_table_mut().ok_or_else(|| anyhow::anyhow!("[archive] is not a table"))?;
+        if !ar.contains_key("render") {
+            ar["render"] = Item::Table(Table::new());
+        }
+        let r = ar["render"].as_table_mut().ok_or_else(|| anyhow::anyhow!("[archive.render] is not a table"))?;
+        r["quality"] = value(quality as i64);
+        r["chroma"] = value(chroma.as_str());
+        self.save_config(&doc.to_string())
+    }
+
     /// One level of a folder for the picker. Empty `path` lists the allowed roots. With `archive`,
     /// only folders inside the local backup folder are shown (starting at its top).
     pub fn browse(&self, path: &str, archive: bool) -> Result<serde_json::Value> {

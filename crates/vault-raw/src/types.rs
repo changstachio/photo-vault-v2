@@ -22,11 +22,35 @@ pub enum WhiteBalance {
     Daylight,
 }
 
+/// JPEG chroma subsampling. 4:2:0 gives much smaller files than 4:4:4 with little visible change.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Chroma {
+    #[serde(rename = "444")]
+    C444,
+    #[serde(rename = "422")]
+    C422,
+    #[serde(rename = "420")]
+    #[default]
+    C420,
+}
+
+impl Chroma {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::C444 => "444",
+            Self::C422 => "422",
+            Self::C420 => "420",
+        }
+    }
+}
+
 /// How RAWs are rendered to JPG (`[photos.render]`).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct Render {
     pub quality: u8,
+    /// Chroma subsampling (`444`, `422`, `420`).
+    pub chroma: Chroma,
     pub white_balance: WhiteBalance,
     /// Exposure correction applied before demosaicing, in stops.
     pub exposure_ev: f32,
@@ -51,7 +75,8 @@ pub struct Render {
 impl Default for Render {
     fn default() -> Self {
         Self {
-            quality: 100,
+            quality: 90,
+            chroma: Chroma::C420,
             white_balance: WhiteBalance::Camera,
             exposure_ev: 0.0,
             preserve_highlights: 0.0,

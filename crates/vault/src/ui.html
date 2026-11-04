@@ -42,6 +42,11 @@ h2{font-size:14px;color:var(--mut);margin:16px 0 4px}
 <div class="row"><b id="selcount"></b><button id="savesel" class="p">Save selection</button><span id="selmsg"></span></div>
 <div id="chosen" class="list small"></div>
 </div>
+<h2>JPG size (task 3)</h2>
+<div class="row"><label>Quality <input type="number" id="q" min="30" max="100" style="width:70px"></label>
+<label>Chroma <select id="chroma"><option value="420">4:2:0 (smallest)</option><option value="422">4:2:2</option><option value="444">4:4:4 (largest)</option></select></label>
+<button id="qsave" class="p">Save</button><span id="qmsg"></span></div>
+<p style="color:var(--mut);margin:0 0 8px">Lower quality and 4:2:0 make smaller JPGs. Each project's log line shows ARW size vs JPG size.</p>
 <h2>Convert / zip selection (task 3)</h2>
 <div class="row"><button id="aup">&uarr; Up</button><code id="ahere"></code></div>
 <div id="alist" class="list"></div>
@@ -80,6 +85,9 @@ async function loadCfg(){const r=await (await fetch("/api/config")).json();
 $("reload").onclick=loadCfg;
 $("save").onclick=async()=>{const r=await (await fetch("/api/config",{method:"POST",headers:{"X-Vault":"1"},body:$("cfg").value})).json();
  $("cmsg").className=r.error?"err":"";$("cmsg").textContent=r.error?r.error:("Saved and applied"+(r.note?". "+r.note:""));tick()};
+(async()=>{const r=await (await fetch("/api/render")).json();$("q").value=r.quality;$("chroma").value=r.chroma})();
+$("qsave").onclick=async()=>{const r=await (await fetch("/api/render",{method:"POST",headers:{"X-Vault":"1"},body:JSON.stringify({quality:+$("q").value,chroma:$("chroma").value})})).json();
+ $("qmsg").className=r.error?"err":"";$("qmsg").textContent=r.error||"Saved";if(!r.error)loadCfg()};
 let rules=new Map(),acur="",aparent=null,aents=[],adefault="none";
 const MODES=[["","\u2014 (inherit)"],["none","skip"],["convert","convert"],["convert_zip","convert + zip"]];
 function inherited(p){let best=null,bl=-1;for(const [rp,m] of rules){if((p===rp||p.startsWith(rp+"/"))&&rp.length>bl&&p!==rp){best=m;bl=rp.length}}return best}

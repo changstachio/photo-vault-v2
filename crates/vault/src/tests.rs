@@ -428,3 +428,26 @@ fn archive_does_not_zip_when_a_symlink_is_present() {
     crate::archive::run(&c, &Ctx::new(false, false, false), None).unwrap();
     assert!(d.join("a.jpg").exists() && !t.path().join("local/2013/Link.zip").exists());
 }
+
+#[test]
+fn render_settings_save_and_smaller_jpgs() {
+    let t = tempfile::tempdir().unwrap();
+    let r = t.path();
+    let text = format!("# note\n[paths]\ningest = \"{r}/i\"\nlocal_backup = \"{r}/l\"\nnetwork_backup = \"{r}/n\"\n[archive]\nthreads = 2\n", r = r.display());
+    let path = r.join("c.toml");
+    fs::write(&path, &text).unwrap();
+    let app = crate::app::App::new(toml::from_str(&text).unwrap(), path.clone());
+    assert_eq!(app.cfg().archive.render.quality, 90, "default quality");
+    app.set_render(80, vault_raw::Chroma::C422).unwrap();
+    assert_eq!(app.cfg().archive.render.quality, 80);
+    assert_eq!(app.cfg().archive.render.chroma, vault_raw::Chroma::C422);
+    assert!(fs::read_to_string(&path).unwrap().contains("# note"));
+    assert!(app.set_render(10, vault_raw::Chroma::C420).is_err());
+    assert_eq!(app.cfg().archive.render.quality, 80);
+    // the same picture gets smaller with lower quality and 4:2:0
+    let dng = r.join("t.dng");
+    fs::write(&dng, vault_raw::testdng::make(512, 384)).unwrap();
+    let size = |q, c| vault_raw::render_jpg(&dng, vault_raw::ColourMode::Preserve, 3, &vault_raw::Render { quality: q, chroma: c, ..Default::default() }).unwrap().1.len();
+    let big = size(100, vault_raw::Chroma::C444);
+    assert!(size(90, vault_raw::Chroma::C420) < big && size(75, vault_raw::Chroma::C420) < size(90, vault_raw::Chroma::C420), "q100/444 = {big}");
+}

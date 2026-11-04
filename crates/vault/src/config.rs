@@ -297,8 +297,8 @@ impl Config {
         if !(1..=256).contains(&self.sync.buffer_mib) {
             bail!("sync.buffer_mib must be 1..=256");
         }
-        if !(50..=100).contains(&self.archive.render.quality) {
-            bail!("archive.render.quality must be 50..=100");
+        if !(30..=100).contains(&self.archive.render.quality) {
+            bail!("archive.render.quality must be 30..=100");
         }
         for s in &self.sync.sources {
             if let Some(l) = &s.label {
@@ -350,7 +350,8 @@ existing_jpg = "rename"                   # ARW with a same-name JPG: rename | u
 demosaic = 3
 colour = "preserve"                         # preserve | srgb | adobergb | prophoto
 [archive.render]
-quality = 100
+quality = 90                                # JPEG quality 30-100; lower = smaller files
+chroma = "420"                              # 420 (smallest) | 422 | 444 (largest)
 
 # [[archive.rule]]                          # normally written by the web UI
 # path = "/mnt/backup/Sony Backup/2015"     # applies to everything under this folder; the deepest rule wins

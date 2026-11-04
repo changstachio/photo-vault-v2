@@ -5,7 +5,7 @@ pub mod types;
 
 use anyhow::{bail, Context, Result};
 use jpeg_encoder::{ColorType, Encoder, SamplingFactor};
-pub use types::{ColourMode, Render, WhiteBalance};
+pub use types::{Chroma, ColourMode, Render, WhiteBalance};
 use std::path::Path;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,7 +85,11 @@ pub fn render_jpg(arw: &Path, mode: ColourMode, demosaic: i32, render: &Render) 
     let px = img.pixels();
     let mut jpg = Vec::with_capacity(px.len() / 4);
     let mut enc = Encoder::new(&mut jpg, render.quality.clamp(1, 100));
-    enc.set_sampling_factor(SamplingFactor::F_1_1);
+    enc.set_sampling_factor(match render.chroma {
+        Chroma::C444 => SamplingFactor::R_4_4_4,
+        Chroma::C422 => SamplingFactor::R_4_2_2,
+        Chroma::C420 => SamplingFactor::R_4_2_0,
+    });
     enc.set_optimized_huffman_tables(true);
     enc.add_icc_profile(&icc::profile(space)).map_err(|e| anyhow::anyhow!("icc: {e}"))?;
     if let Some(x) = exifcopy::build(&buf, w, h, space) {

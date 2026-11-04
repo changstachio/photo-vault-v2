@@ -24,6 +24,10 @@ Linux photo backup tool in Rust. One binary, `vault`, with four jobs, a schedule
 | Sync refuses to run if `sync.require_mount` is not a mount point | `sync.rs` |
 | Copies go to a temp file, then rename; source changes mid-copy fail the file | `util.rs` |
 
+## JPG size
+
+`[archive.render]` has `quality` (30-100, default 90) and `chroma` (`420` default, `422`, `444`); both can be set in the web UI under *JPG size*. The earlier default (quality 100, 4:4:4) can produce JPGs larger than a compressed ARW. 4:2:0 at quality 85-90 is normally much smaller. Each converted project logs `ARW <size> -> JPG <size> (%)` and warns when the JPGs came out larger. Real ARW sizes vary by camera and compression, so check the first few projects with `vault archive --limit 1`.
+
 ## Choosing what task 3 touches
 
 In the web UI's *Convert / zip selection*, open the local backup folders and set each year or project to **skip**, **convert** (ARW to JPG, no zip) or **convert + zip**. A choice on a year folder covers its projects; a choice on a project overrides it. Folders with no choice use `archive.default`, which is `none`: nothing is converted, zipped or deleted until you choose. Saved as `[[archive.rule]]` entries (`path`, `mode`) in the config file.

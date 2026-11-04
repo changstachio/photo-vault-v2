@@ -77,7 +77,12 @@ fn project(cfg: &Config, ctx: &Ctx, dir: &Path, mode: ArchiveMode) -> Result<()>
         if ctx.dry {
             return finish_dry(ctx, &name, mode);
         }
-        let errs: Vec<String> = arws.par_iter().filter_map(|f| convert_one(cfg, ctx, f).err().map(|e| format!("{}: {e:#}", f.rel.display()))).collect();
+        let results: Vec<Result<(u64, u64), String>> = arws.par_iter().map(|f| convert_one(cfg, ctx, f).map_err(|e| format!("{}: {e:#}", f.rel.display()))).collect();
+        let (arw_total, jpg_total) = results.iter().filter_map(|r| r.as_ref().ok()).fold((0u64, 0u64), |a, r| (a.0 + r.0, a.1 + r.1));
+        let errs: Vec<String> = results.into_iter().filter_map(|r| r.err()).collect();
+        if jpg_total > 0 {
+            ctx.log(format!("{name}: ARW {} -> JPG {} ({:.0}%){}", fmt_bytes(arw_total), fmt_bytes(jpg_total), jpg_total as f64 * 100.0 / arw_total.max(1) as f64, if jpg_total > arw_total { "  JPGs are LARGER than the ARWs: lower the quality or use 4:2:0" } else { "" }));
+        }
         if !errs.is_empty() {
             for e in errs.iter().take(10) {
                 ctx.log(format!("{name}: {e}"));
@@ -127,7 +132,8 @@ fn existing_jpg(f: &FileInfo) -> Option<PathBuf> {
     })
 }
 
-fn convert_one(cfg: &Config, ctx: &Ctx, f: &FileInfo) -> Result<()> {
+/// Returns (ARW bytes, JPG bytes) for the size report; JPG is 0 when an existing JPG was used.
+fn convert_one(cfg: &Config, ctx: &Ctx, f: &FileInfo) -> Result<(u64, u64)> {
     let a = &cfg.archive;
     let mode = ctx.existing.lock().unwrap().unwrap_or(a.existing_jpg);
     let existing = existing_jpg(f);
@@ -137,7 +143,7 @@ fn convert_one(cfg: &Config, ctx: &Ctx, f: &FileInfo) -> Result<()> {
             bail!("{} has no pixels; ARW kept", j.display());
         }
         fs::remove_file(&f.abs).with_context(|| format!("deleting {}", f.abs.display()))?;
-        return Ok(());
+        return Ok((f.size, 0));
     }
     let (_, bytes) = vault_raw::render_jpg(&f.abs, a.colour, a.demosaic, &a.render)?;
     let want = blake3::hash(&bytes);
@@ -184,7 +190,7 @@ fn convert_one(cfg: &Config, ctx: &Ctx, f: &FileInfo) -> Result<()> {
         bail!("JPG has no pixels");
     }
     fs::remove_file(&f.abs).with_context(|| format!("deleting {}", f.abs.display()))?;
-    Ok(())
+    Ok((f.size, bytes.len() as u64))
 }
 
 fn zip_folder(ctx: &Ctx, dir: &Path, name: &str, files: &[FileInfo]) -> Result<()> {

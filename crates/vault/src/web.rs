@@ -41,6 +41,28 @@ pub fn serve(app: Arc<App>) -> Result<()> {
                 Err(e) => json(serde_json::json!({"error": format!("{e:#}")}), 400),
             },
             (Method::Get, "/api/sources") => json(serde_json::json!({"sources": app.cfg().sync.sources.iter().map(|s| serde_json::json!({"path": s.path.to_string_lossy(), "label": s.label})).collect::<Vec<_>>()}), 200),
+            (Method::Get, "/api/render") => {
+                let r = &app.cfg().archive.render;
+                json(serde_json::json!({"quality": r.quality, "chroma": r.chroma.as_str()}), 200)
+            }
+            (Method::Post, "/api/render") => {
+                if !req.headers().iter().any(|h| h.field.equiv("X-Vault")) {
+                    json(serde_json::json!({"error": "missing X-Vault header"}), 403)
+                } else {
+                    #[derive(serde::Deserialize)]
+                    struct B {
+                        quality: u8,
+                        chroma: vault_raw::Chroma,
+                    }
+                    match read_body(&mut req).and_then(|b| serde_json::from_str::<B>(&b).ok()) {
+                        None => json(serde_json::json!({"error": "expected {quality, chroma}"}), 400),
+                        Some(b) => match app.set_render(b.quality, b.chroma) {
+                            Ok(_) => json(serde_json::json!({"ok": true}), 200),
+                            Err(e) => json(serde_json::json!({"error": format!("{e:#}")}), 400),
+                        },
+                    }
+                }
+            }
             (Method::Get, "/api/rules") => json(serde_json::json!({"default": app.cfg().archive.default.as_str(), "rules": app.cfg().archive.rules.iter().map(|r| serde_json::json!({"path": r.path.to_string_lossy(), "mode": r.mode.as_str()})).collect::<Vec<_>>()}), 200),
             (Method::Post, "/api/rules") => {
                 if !req.headers().iter().any(|h| h.field.equiv("X-Vault")) {
