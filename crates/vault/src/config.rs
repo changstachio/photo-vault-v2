@@ -109,7 +109,7 @@ pub enum ArchiveMode {
     None,
     /// ARW to JPG, delete the ARW; no zip.
     Convert,
-    /// ARW to JPG, then zip the folder if only JPGs remain.
+    /// ARW to JPG, then zip the folder (any file types; no ARW may remain).
     ConvertZip,
 }
 
@@ -343,7 +343,7 @@ path = "/mnt/ssd/ingest"
 min_idle_minutes = 30                       # skip projects touched more recently than this
 threads = 4
 
-[archive]                                   # part 3: ARW -> JPG, then zip JPG-only projects
+[archive]                                   # part 3: ARW -> JPG, then zip projects with no ARW left
 default = "none"                            # projects without a rule: none | convert | convert_zip. Choose folders in the web UI.
 threads = 4
 existing_jpg = "rename"                   # ARW with a same-name JPG: rename | use_existing (delete the ARW, no conversion) | overwrite

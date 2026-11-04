@@ -129,22 +129,29 @@ fn ingest_with_existing_identical_local_copy_deletes_cache_only() {
 }
 
 #[test]
-fn archive_zips_jpg_only_projects_and_keeps_mixed_ones() {
+fn archive_zips_any_project_without_arw() {
     let t = tempfile::tempdir().unwrap();
     let c = cfg(t.path());
     put(&t.path().join("local/2015/Done/1.jpg"), &vec![1u8; 100_000], 5 * YEAR);
     put(&t.path().join("local/2015/Done/s/2.JPG"), &vec![2u8; 50_000], 5 * YEAR);
     put(&t.path().join("local/2016/Mixed/1.jpg"), b"a", 5 * YEAR);
     put(&t.path().join("local/2016/Mixed/notes.txt"), b"keep", 5 * YEAR);
+    put(&t.path().join("local/2016/Mixed/edit.xmp"), b"<x/>", 5 * YEAR);
+    fs::create_dir_all(t.path().join("local/2016/Mixed/empty")).unwrap();
     crate::archive::run(&c, &Ctx::new(true, false, false), None).unwrap();
     assert!(t.path().join("local/2015/Done").is_dir(), "dry run changes nothing");
     crate::archive::run(&c, &Ctx::new(false, false, false), None).unwrap();
     assert!(!t.path().join("local/2015/Done").exists());
     let z = zip::ZipArchive::new(fs::File::open(t.path().join("local/2015/Done.zip")).unwrap()).unwrap();
-    assert_eq!(z.len(), 2);
+    assert_eq!(z.len(), 3, "two files and the subfolder entry");
     assert!(z.file_names().any(|n| n.map(|s| s == "Done/s/2.JPG").unwrap_or(false)));
-    assert!(t.path().join("local/2016/Mixed/1.jpg").exists(), "mixed project untouched");
-    assert!(!t.path().join("local/2016/Mixed.zip").exists());
+    // other file types and empty subfolders are fine: zipped, nothing lost
+    assert!(!t.path().join("local/2016/Mixed").exists());
+    let z = zip::ZipArchive::new(fs::File::open(t.path().join("local/2016/Mixed.zip")).unwrap()).unwrap();
+    let names: Vec<String> = z.file_names().map(|n| n.unwrap().to_string()).collect();
+    for want in ["Mixed/1.jpg", "Mixed/notes.txt", "Mixed/edit.xmp", "Mixed/empty/"] {
+        assert!(names.iter().any(|n| n == want), "{want} missing from {names:?}");
+    }
 }
 
 #[test]
@@ -206,6 +213,7 @@ fn archive_never_overwrites_an_existing_jpg() {
 fn clash(t: &Path, mode: crate::config::ExistingJpg) -> (Config, std::path::PathBuf) {
     let mut c = cfg(t);
     c.archive.existing_jpg = mode;
+    c.archive.default = crate::config::ArchiveMode::Convert; // convert only, so the files can be inspected
     let d = t.join("local/2014/Clash");
     fs::create_dir_all(&d).unwrap();
     fs::write(d.join("a.arw"), vault_raw::testdng::make(64, 48)).unwrap();
@@ -219,7 +227,6 @@ fn clash(t: &Path, mode: crate::config::ExistingJpg) -> (Config, std::path::Path
 fn existing_jpg_use_existing_deletes_arw_without_converting() {
     let t = tempfile::tempdir().unwrap();
     let (mut c, d) = clash(t.path(), crate::config::ExistingJpg::UseExisting);
-    fs::write(d.join("keep.txt"), b"x").unwrap(); // stop the zip step so files can be inspected
     c.archive.threads = 1;
     let before = fs::read(d.join("a.jpg")).unwrap();
     crate::archive::run(&c, &Ctx::new(false, false, false), None).unwrap();
@@ -242,7 +249,6 @@ fn existing_jpg_overwrite_replaces_it() {
     let t = tempfile::tempdir().unwrap();
     let (c, d) = clash(t.path(), crate::config::ExistingJpg::Overwrite);
     fs::write(d.join("a.jpg"), b"old edit").unwrap();
-    fs::write(d.join("keep.txt"), b"x").unwrap();
     crate::archive::run(&c, &Ctx::new(false, false, false), None).unwrap();
     assert!(!d.join("a.arw").exists());
     assert!(!d.join("a_arw.jpg").exists());
@@ -253,7 +259,6 @@ fn existing_jpg_overwrite_replaces_it() {
 fn existing_jpg_override_from_ctx_beats_config() {
     let t = tempfile::tempdir().unwrap();
     let (c, d) = clash(t.path(), crate::config::ExistingJpg::Rename);
-    fs::write(d.join("keep.txt"), b"x").unwrap();
     let ctx = Ctx::new(false, false, false);
     *ctx.existing.lock().unwrap() = Some(crate::config::ExistingJpg::UseExisting);
     crate::archive::run(&c, &ctx, None).unwrap();
@@ -411,4 +416,15 @@ fn archive_rules_save_only_inside_local_backup_and_keep_comments() {
     let b = app.browse("", true).unwrap();
     assert_eq!(b["entries"].as_array().unwrap().len(), 1);
     assert!(app.browse(&r.join("other").to_string_lossy(), true).is_err());
+}
+
+#[test]
+fn archive_does_not_zip_when_a_symlink_is_present() {
+    let t = tempfile::tempdir().unwrap();
+    let c = cfg(t.path());
+    let d = t.path().join("local/2013/Link");
+    put(&d.join("a.jpg"), b"a", 5 * YEAR);
+    std::os::unix::fs::symlink("a.jpg", d.join("l.jpg")).unwrap();
+    crate::archive::run(&c, &Ctx::new(false, false, false), None).unwrap();
+    assert!(d.join("a.jpg").exists() && !t.path().join("local/2013/Link.zip").exists());
 }

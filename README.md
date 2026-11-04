@@ -6,7 +6,7 @@ Linux photo backup tool in Rust. One binary, `vault`, with four jobs, a schedule
 |---|---|---|
 | 1 Sync | `vault sync` | Copies the listed folders (not everything) to the network share. Skips unchanged files (size + mtime), never deletes on the share. |
 | 2 Ingest | `vault ingest` | For each project folder in the SSD ingest cache: confirm it in the local backup byte for byte (BLAKE3), copying it to `Sony Backup/<year>/<project>/` if missing, then delete it from the cache. |
-| 3 Archive | `vault archive` | Oldest first: ARW to JPG (LibRaw), delete the ARW only after the JPG is read back and decodes, then zip (stored) folders that contain only JPGs and delete the folder after the zip is verified. |
+| 3 Archive | `vault archive` | Oldest first: ARW to JPG (LibRaw), delete the ARW only after the JPG is read back and decodes, then zip (stored) any folder with no ARW left (other files, subfolders and empty folders are kept in the zip) and delete the folder after the zip is verified. |
 | 4 Dates | `vault dates [--apply]` | Walks the network and local backup roots, finds each project's real year, and lists (or with `--apply` moves) projects in the wrong `<year>` folder. |
 
 `--dry-run` (sync, ingest, archive) changes nothing.

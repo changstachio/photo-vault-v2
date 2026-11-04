@@ -10,8 +10,8 @@ use crate::job::Ctx;
 use crate::util::*;
 
 /// Part 3: oldest first, convert ARW to JPG (ARW deleted only after the JPG is read back and
-/// checked), then zip folders that contain nothing but JPGs (stored, folder deleted only after the
-/// zip is read back and every file matches).
+/// checked), then zip folders that contain no ARW (stored; folder deleted only after the zip is
+/// read back and every file matches).
 pub fn run(cfg: &Config, ctx: &Ctx, limit: Option<usize>) -> Result<()> {
     let root = &cfg.paths.local_backup;
     if !root.is_dir() {
@@ -75,7 +75,7 @@ fn project(cfg: &Config, ctx: &Ctx, dir: &Path, mode: ArchiveMode) -> Result<()>
     if !arws.is_empty() {
         ctx.log(format!("{name}: {} ARW file(s) to convert", arws.len()));
         if ctx.dry {
-            return finish_dry(ctx, &name, &files, arws.len(), mode);
+            return finish_dry(ctx, &name, mode);
         }
         let errs: Vec<String> = arws.par_iter().filter_map(|f| convert_one(cfg, ctx, f).err().map(|e| format!("{}: {e:#}", f.rel.display()))).collect();
         if !errs.is_empty() {
@@ -88,25 +88,33 @@ fn project(cfg: &Config, ctx: &Ctx, dir: &Path, mode: ArchiveMode) -> Result<()>
     if mode == ArchiveMode::Convert {
         return Ok(());
     }
+    // Anything except RAW (.arw) files may be zipped: JPGs, XMP/PNG/video sidecars, subfolders.
     let files = list_files(dir)?;
-    let only_jpg = !files.is_empty() && files.iter().all(|f| matches!(ext_lower(&f.abs).as_str(), "jpg" | "jpeg"));
-    if !only_jpg {
-        if arws.is_empty() {
-            ctx.log(format!("{name}: has other files or is empty, not zipped"));
-        } else {
-            ctx.log(format!("{name}: converted; other files remain, not zipped"));
-        }
+    if files.is_empty() {
+        ctx.log(format!("{name}: empty, not zipped"));
+        return Ok(());
+    }
+    if let Some(a) = files.iter().find(|f| ext_lower(&f.abs) == "arw") {
+        bail!("{} is still an ARW; not zipped", a.rel.display());
+    }
+    if let Some(sp) = special_entry(dir) {
+        ctx.log(format!("{name}: contains {} (symlink or special file), not zipped", sp.display()));
         return Ok(());
     }
     if ctx.dry {
-        ctx.log(format!("{name}: would zip {} JPG(s) and remove the folder", files.len()));
+        ctx.log(format!("{name}: would zip {} file(s) and remove the folder", files.len()));
         return Ok(());
     }
     zip_folder(ctx, dir, &name, &files)
 }
 
-fn finish_dry(ctx: &Ctx, name: &str, files: &[FileInfo], arws: usize, mode: ArchiveMode) -> Result<()> {
-    if mode == ArchiveMode::ConvertZip && files.len() == arws || files.iter().all(|f| matches!(ext_lower(&f.abs).as_str(), "arw" | "jpg" | "jpeg")) {
+/// First entry that is neither a regular file nor a folder (zipping would silently drop it).
+fn special_entry(dir: &Path) -> Option<PathBuf> {
+    walkdir::WalkDir::new(dir).follow_links(false).into_iter().filter_map(|e| e.ok()).find(|e| !e.file_type().is_file() && !e.file_type().is_dir()).map(|e| e.into_path())
+}
+
+fn finish_dry(ctx: &Ctx, name: &str, mode: ArchiveMode) -> Result<()> {
+    if mode == ArchiveMode::ConvertZip {
         ctx.log(format!("{name}: would then zip and remove the folder"));
     }
     Ok(())
@@ -186,9 +194,11 @@ fn zip_folder(ctx: &Ctx, dir: &Path, name: &str, files: &[FileInfo]) -> Result<(
         bail!("{} already exists; folder not zipped", zpath.display());
     }
     let tmp = parent.join(format!(".{name}.zip.vtmp"));
+    // Subfolders are stored as entries too, so empty ones survive.
+    let dirs: Vec<PathBuf> = walkdir::WalkDir::new(dir).min_depth(1).sort_by_file_name().into_iter().filter_map(|e| e.ok()).filter(|e| e.file_type().is_dir()).filter_map(|e| e.path().strip_prefix(dir).ok().map(|p| p.to_path_buf())).collect();
     let r = (|| -> Result<()> {
-        write_zip(&tmp, name, files)?;
-        verify_zip(&tmp, name, files)?;
+        write_zip(&tmp, name, files, &dirs)?;
+        verify_zip(&tmp, name, files, &dirs)?;
         File::open(&tmp)?.sync_all()?;
         fs::rename(&tmp, &zpath)?;
         Ok(())
@@ -215,9 +225,12 @@ fn entry_name(name: &str, rel: &Path) -> String {
     format!("{name}/{}", rel.join("/"))
 }
 
-fn write_zip(tmp: &Path, name: &str, files: &[FileInfo]) -> Result<()> {
+fn write_zip(tmp: &Path, name: &str, files: &[FileInfo], dirs: &[PathBuf]) -> Result<()> {
     use chrono::{Datelike, Timelike};
     let mut z = zip::ZipWriter::new(File::create(tmp)?);
+    for d in dirs {
+        z.add_directory(entry_name(name, d), zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored))?;
+    }
     for f in files {
         let t: chrono::DateTime<chrono::Local> = f.mtime.into();
         let mut opt = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored).large_file(true);
@@ -232,10 +245,10 @@ fn write_zip(tmp: &Path, name: &str, files: &[FileInfo]) -> Result<()> {
     Ok(())
 }
 
-fn verify_zip(zp: &Path, name: &str, files: &[FileInfo]) -> Result<()> {
+fn verify_zip(zp: &Path, name: &str, files: &[FileInfo], dirs: &[PathBuf]) -> Result<()> {
     let mut z = zip::ZipArchive::new(File::open(zp)?)?;
-    if z.len() != files.len() {
-        bail!("zip has {} entries, expected {}", z.len(), files.len());
+    if z.len() != files.len() + dirs.len() {
+        bail!("zip has {} entries, expected {}", z.len(), files.len() + dirs.len());
     }
     for f in files {
         let mut e = z.by_name(&entry_name(name, &f.rel)).with_context(|| format!("{} missing from zip", f.rel.display()))?;

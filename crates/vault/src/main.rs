@@ -32,7 +32,7 @@ enum Cmd {
     Sync { #[arg(long)] dry_run: bool },
     /// 2: copy new projects from the ingest cache into the local backup, then free the cache
     Ingest { #[arg(long)] dry_run: bool },
-    /// 3: convert ARW to JPG and zip JPG-only projects, oldest first
+    /// 3: convert ARW to JPG and zip projects with no ARW left, oldest first
     Archive {
         #[arg(long)] dry_run: bool,
         #[arg(long)] limit: Option<usize>,
