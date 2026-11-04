@@ -10,7 +10,9 @@ id photovault >/dev/null 2>&1 || useradd --system --create-home --shell /usr/sbi
 [ -e /etc/systemd/system/photovault.service ] || chown photovault: /etc/photovault /etc/photovault/config.toml
 # Keep a User= you set earlier; reinstalling must not reset it.
 UNIT=/etc/systemd/system/photovault.service
-OLD_USER=$(sed -n 's/^User=//p' "$UNIT" 2>/dev/null | head -n1 || true)
+# Effective user, including drop-ins (systemctl edit / override.conf); falls back to the unit file.
+OLD_USER=$(systemctl show photovault -p User --value 2>/dev/null || true)
+[ -n "$OLD_USER" ] || OLD_USER=$(sed -n 's/^User=//p' "$UNIT" 2>/dev/null | head -n1 || true)
 install -m 0644 install/photovault.service "$UNIT"
 if [ -n "$OLD_USER" ]; then
   sed -i "s/^User=.*/User=$OLD_USER/" "$UNIT"
