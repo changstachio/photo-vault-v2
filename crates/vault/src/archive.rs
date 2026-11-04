@@ -5,7 +5,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
-use crate::config::Config;
+use crate::config::{Config, ExistingJpg};
 use crate::job::Ctx;
 use crate::util::*;
 
@@ -72,7 +72,7 @@ fn project(cfg: &Config, ctx: &Ctx, dir: &Path) -> Result<()> {
         if ctx.dry {
             return finish_dry(ctx, &name, &files, arws.len());
         }
-        let errs: Vec<String> = arws.par_iter().filter_map(|f| convert_one(cfg, f).err().map(|e| format!("{}: {e:#}", f.rel.display()))).collect();
+        let errs: Vec<String> = arws.par_iter().filter_map(|f| convert_one(cfg, ctx, f).err().map(|e| format!("{}: {e:#}", f.rel.display()))).collect();
         if !errs.is_empty() {
             for e in errs.iter().take(10) {
                 ctx.log(format!("{name}: {e}"));
@@ -104,8 +104,25 @@ fn finish_dry(ctx: &Ctx, name: &str, files: &[FileInfo], arws: usize) -> Result<
     Ok(())
 }
 
-fn convert_one(cfg: &Config, f: &FileInfo) -> Result<()> {
+fn existing_jpg(f: &FileInfo) -> Option<PathBuf> {
+    let stem = f.abs.file_stem()?.to_string_lossy().to_lowercase();
+    fs::read_dir(f.abs.parent()?).ok()?.filter_map(|e| e.ok()).map(|e| e.path()).find(|p| {
+        p.is_file() && matches!(ext_lower(p).as_str(), "jpg" | "jpeg") && p.file_stem().map(|s| s.to_string_lossy().to_lowercase()) == Some(stem.clone())
+    })
+}
+
+fn convert_one(cfg: &Config, ctx: &Ctx, f: &FileInfo) -> Result<()> {
     let a = &cfg.archive;
+    let mode = ctx.existing.lock().unwrap().unwrap_or(a.existing_jpg);
+    let existing = existing_jpg(f);
+    if let (ExistingJpg::UseExisting, Some(j)) = (mode, &existing) {
+        let info = vault_raw::probe_decode(j).with_context(|| format!("{} does not decode; ARW kept", j.display()))?;
+        if info.width == 0 || info.height == 0 {
+            bail!("{} has no pixels; ARW kept", j.display());
+        }
+        fs::remove_file(&f.abs).with_context(|| format!("deleting {}", f.abs.display()))?;
+        return Ok(());
+    }
     let (_, bytes) = vault_raw::render_jpg(&f.abs, a.colour, a.demosaic, &a.render)?;
     let want = blake3::hash(&bytes);
     let stem = f.abs.file_stem().unwrap().to_string_lossy().into_owned();
@@ -113,7 +130,23 @@ fn convert_one(cfg: &Config, f: &FileInfo) -> Result<()> {
     // An existing JPG with identical bytes is our own earlier output (interrupted run); a different
     // one is the user's, so a second name is used rather than overwriting it.
     let mut out = None;
-    for cand in [format!("{stem}.jpg"), format!("{stem}_arw.jpg")] {
+    if let (ExistingJpg::Overwrite, Some(j)) = (mode, &existing) {
+        let n = j.file_name().unwrap().to_string_lossy().into_owned();
+        let tmp = j.with_file_name(format!(".{n}.vtmp"));
+        let r = (|| -> Result<()> {
+            let mut t = File::create(&tmp)?;
+            t.write_all(&bytes)?;
+            t.sync_all()?;
+            fs::rename(&tmp, j)?;
+            Ok(())
+        })();
+        if r.is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+        r?;
+        out = Some(j.clone());
+    }
+    for cand in [format!("{stem}.jpg"), format!("{stem}_arw.jpg")].into_iter().filter(|_| out.is_none()) {
         let p = parent.join(cand);
         if !p.exists() {
             vault_raw::write_atomic(&p, &bytes)?;

@@ -17,11 +17,22 @@ Linux photo backup tool in Rust. One binary, `vault`, with four jobs, a schedule
 |---|---|
 | Year = oldest of EXIF capture time, file creation time, modified time; anything before 2010 or in the future is ignored | `dates.rs` |
 | Ingest deletes only files it has just re-hashed at the destination, never overwrites a differing file, skips projects touched within `min_idle_minutes` | `ingest.rs` |
-| ARW is deleted only after the JPG's hash matches the rendered bytes and it decodes; an existing different `name.jpg` is never overwritten (`name_arw.jpg` is used) | `archive.rs` |
+| ARW is deleted only after the JPG's hash matches the rendered bytes and it decodes | `archive.rs` |
+| ARW with a same-name JPG follows `archive.existing_jpg` (below) | `archive.rs` |
 | Folder is deleted only after the zip is re-read and every file's hash matches | `archive.rs` |
 | A project that exists only as a zip in the local backup is left alone by ingest | `ingest.rs` |
 | Sync refuses to run if `sync.require_mount` is not a mount point | `sync.rs` |
 | Copies go to a temp file, then rename; source changes mid-copy fail the file | `util.rs` |
+
+## ARW with a same-name JPG
+
+Set `archive.existing_jpg` in the config, pass `vault archive --existing-jpg <mode>`, or pick it in the web UI.
+
+| Mode | Effect |
+|---|---|
+| `rename` (default) | Keep the existing JPG, save the conversion as `name_arw.jpg`, delete the ARW |
+| `use_existing` | Check the existing JPG decodes, then delete the ARW with no conversion. A JPG that does not decode keeps the ARW and reports an error |
+| `overwrite` | Replace the existing JPG with a fresh conversion, then delete the ARW |
 
 ## Install
 

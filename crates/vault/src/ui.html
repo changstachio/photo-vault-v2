@@ -23,6 +23,7 @@ h2{font-size:14px;color:var(--mut);margin:16px 0 4px}
 <div class="row">
 <label><input type="checkbox" id="dry"> Dry run (no changes)</label>
 <label><input type="checkbox" id="apply"> Dates: move folders to the right year</label>
+<label>ARW with same-name JPG: <select id="existing"><option value="">config default</option><option value="rename">keep both (rename)</option><option value="use_existing">delete ARW, keep JPG</option><option value="overwrite">overwrite JPG</option></select></label>
 <button id="cancel">Cancel</button>
 </div>
 <div class="bar"><i id="bar"></i></div>
@@ -36,7 +37,7 @@ const T=[["sync","1 · Sync to network share"],["ingest","2 · Ingest to local b
 const $=id=>document.getElementById(id);
 const post=(u)=>fetch(u,{method:"POST",headers:{"X-Vault":"1"}}).then(r=>r.json());
 T.forEach(([t,l])=>{const b=document.createElement("button");b.textContent=l;b.className="p";b.dataset.t=t;
- b.onclick=async()=>{const r=await post(`/api/run?task=${t}&dry=${$("dry").checked?1:0}&apply=${$("apply").checked?1:0}`);if(r.error)alert(r.error);tick()};$("btns").append(b)});
+ b.onclick=async()=>{const r=await post(`/api/run?task=${t}&dry=${$("dry").checked?1:0}&apply=${$("apply").checked?1:0}&existing=${$("existing").value}`);if(r.error)alert(r.error);tick()};$("btns").append(b)});
 $("cancel").onclick=()=>post("/api/cancel");
 const gb=n=>(n/1e9).toFixed(2)+" GB";
 async function tick(){

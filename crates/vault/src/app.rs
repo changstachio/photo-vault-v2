@@ -35,7 +35,7 @@ impl App {
     }
 
     /// Start a task in the background; one task at a time.
-    pub fn start(self: &Arc<Self>, task: &str, dry: bool, apply: bool) -> Result<()> {
+    pub fn start(self: &Arc<Self>, task: &str, dry: bool, apply: bool, existing: Option<crate::config::ExistingJpg>) -> Result<()> {
         let mut j = self.job.lock().unwrap();
         if j.as_ref().map(|r| !r.done).unwrap_or(false) {
             bail!("a task is already running");
@@ -44,6 +44,7 @@ impl App {
             bail!("unknown task {task}");
         }
         let ctx = Ctx::new(dry, apply, true);
+        *ctx.existing.lock().unwrap() = existing;
         *j = Some(Running { task: task.into(), ctx: ctx.clone(), done: false, result: None });
         drop(j);
         let app = self.clone();
@@ -104,7 +105,7 @@ impl App {
 pub fn scheduler(app: Arc<App>) {
     for t in app.cfg.daemon.run_on_start.clone() {
         // Start-up tasks queue behind each other.
-        while app.start(&t, false, false).is_err() {
+        while app.start(&t, false, false, None).is_err() {
             std::thread::sleep(std::time::Duration::from_secs(5));
         }
         app.events.log(format!("started {t} on daemon start"));
@@ -129,7 +130,7 @@ pub fn scheduler(app: Arc<App>) {
                 continue;
             }
             fired.insert(i, key.clone());
-            match app.start(&s.task, false, false) {
+            match app.start(&s.task, false, false, None) {
                 Ok(()) => app.events.log(format!("scheduled {} started", s.task)),
                 Err(e) => app.events.log(format!("scheduled {} not started: {e}", s.task)),
             }

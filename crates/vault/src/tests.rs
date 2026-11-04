@@ -200,3 +200,60 @@ fn archive_never_overwrites_an_existing_jpg() {
     let z = zip::ZipArchive::new(fs::File::open(t.path().join("local/2014/Clash.zip")).unwrap()).unwrap();
     assert_eq!(z.len(), 2, "user's a.jpg and a_arw.jpg both kept");
 }
+
+fn clash(t: &Path, mode: crate::config::ExistingJpg) -> (Config, std::path::PathBuf) {
+    let mut c = cfg(t);
+    c.archive.existing_jpg = mode;
+    let d = t.join("local/2014/Clash");
+    fs::create_dir_all(&d).unwrap();
+    fs::write(d.join("a.arw"), vault_raw::testdng::make(64, 48)).unwrap();
+    // a real, decodable JPG with the same name
+    let (_, jpg) = vault_raw::render_jpg(&d.join("a.arw"), vault_raw::ColourMode::Preserve, 3, &vault_raw::Render::default()).unwrap();
+    fs::write(d.join("a.jpg"), &jpg).unwrap();
+    (c, d)
+}
+
+#[test]
+fn existing_jpg_use_existing_deletes_arw_without_converting() {
+    let t = tempfile::tempdir().unwrap();
+    let (mut c, d) = clash(t.path(), crate::config::ExistingJpg::UseExisting);
+    fs::write(d.join("keep.txt"), b"x").unwrap(); // stop the zip step so files can be inspected
+    c.archive.threads = 1;
+    let before = fs::read(d.join("a.jpg")).unwrap();
+    crate::archive::run(&c, &Ctx::new(false, false, false), None).unwrap();
+    assert!(!d.join("a.arw").exists());
+    assert!(!d.join("a_arw.jpg").exists());
+    assert_eq!(fs::read(d.join("a.jpg")).unwrap(), before);
+}
+
+#[test]
+fn existing_jpg_use_existing_keeps_arw_if_jpg_is_broken() {
+    let t = tempfile::tempdir().unwrap();
+    let (c, d) = clash(t.path(), crate::config::ExistingJpg::UseExisting);
+    fs::write(d.join("a.jpg"), b"garbage").unwrap();
+    assert!(crate::archive::run(&c, &Ctx::new(false, false, false), None).is_err());
+    assert!(d.join("a.arw").exists());
+}
+
+#[test]
+fn existing_jpg_overwrite_replaces_it() {
+    let t = tempfile::tempdir().unwrap();
+    let (c, d) = clash(t.path(), crate::config::ExistingJpg::Overwrite);
+    fs::write(d.join("a.jpg"), b"old edit").unwrap();
+    fs::write(d.join("keep.txt"), b"x").unwrap();
+    crate::archive::run(&c, &Ctx::new(false, false, false), None).unwrap();
+    assert!(!d.join("a.arw").exists());
+    assert!(!d.join("a_arw.jpg").exists());
+    assert!(vault_raw::probe_decode(&d.join("a.jpg")).is_ok());
+}
+
+#[test]
+fn existing_jpg_override_from_ctx_beats_config() {
+    let t = tempfile::tempdir().unwrap();
+    let (c, d) = clash(t.path(), crate::config::ExistingJpg::Rename);
+    fs::write(d.join("keep.txt"), b"x").unwrap();
+    let ctx = Ctx::new(false, false, false);
+    *ctx.existing.lock().unwrap() = Some(crate::config::ExistingJpg::UseExisting);
+    crate::archive::run(&c, &ctx, None).unwrap();
+    assert!(!d.join("a.arw").exists() && !d.join("a_arw.jpg").exists());
+}

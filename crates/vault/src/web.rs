@@ -34,7 +34,8 @@ pub fn serve(app: Arc<App>) -> Result<()> {
                     json(serde_json::json!({"ok": true}), 200)
                 } else {
                     let task = param(q, "task").unwrap_or("");
-                    match app.start(task, param(q, "dry") == Some("1"), param(q, "apply") == Some("1")) {
+                    let existing = param(q, "existing").and_then(|v| v.parse().ok());
+                    match app.start(task, param(q, "dry") == Some("1"), param(q, "apply") == Some("1"), existing) {
                         Ok(()) => json(serde_json::json!({"ok": true}), 200),
                         Err(e) => json(serde_json::json!({"error": e.to_string()}), 409),
                     }

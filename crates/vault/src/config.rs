@@ -75,9 +75,35 @@ impl Default for Ingest {
     }
 }
 
+/// What to do when an ARW has a JPG with the same name beside it.
+#[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ExistingJpg {
+    /// Keep the existing JPG and save the conversion as `name_arw.jpg`.
+    #[default]
+    Rename,
+    /// Treat the existing JPG as the converted copy: delete the ARW without converting.
+    UseExisting,
+    /// Replace the existing JPG with a fresh conversion.
+    Overwrite,
+}
+
+impl std::str::FromStr for ExistingJpg {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s {
+            "rename" => Ok(Self::Rename),
+            "use_existing" => Ok(Self::UseExisting),
+            "overwrite" => Ok(Self::Overwrite),
+            _ => Err(format!("{s:?}: expected rename, use_existing or overwrite")),
+        }
+    }
+}
+
 #[derive(Deserialize, Clone, Debug)]
 #[serde(deny_unknown_fields, default)]
 pub struct Archive {
+    pub existing_jpg: ExistingJpg,
     pub threads: usize,
     pub demosaic: i32,
     pub colour: ColourMode,
@@ -87,7 +113,7 @@ pub struct Archive {
 impl Default for Archive {
     fn default() -> Self {
         let n = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-        Self { threads: (n / 2).max(1), demosaic: 3, colour: ColourMode::Preserve, render: Render::default() }
+        Self { existing_jpg: ExistingJpg::Rename, threads: (n / 2).max(1), demosaic: 3, colour: ColourMode::Preserve, render: Render::default() }
     }
 }
 
@@ -214,6 +240,7 @@ threads = 4
 
 [archive]                                   # part 3: ARW -> JPG, then zip JPG-only projects
 threads = 4
+existing_jpg = "rename"                   # ARW with a same-name JPG: rename | use_existing (delete the ARW, no conversion) | overwrite
 demosaic = 3
 colour = "preserve"                         # preserve | srgb | adobergb | prophoto
 [archive.render]

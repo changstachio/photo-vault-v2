@@ -33,7 +33,12 @@ enum Cmd {
     /// 2: copy new projects from the ingest cache into the local backup, then free the cache
     Ingest { #[arg(long)] dry_run: bool },
     /// 3: convert ARW to JPG and zip JPG-only projects, oldest first
-    Archive { #[arg(long)] dry_run: bool, #[arg(long)] limit: Option<usize> },
+    Archive {
+        #[arg(long)] dry_run: bool,
+        #[arg(long)] limit: Option<usize>,
+        /// ARW with a same-name JPG: rename | use_existing | overwrite (default: config)
+        #[arg(long)] existing_jpg: Option<config::ExistingJpg>,
+    },
     /// 4: report (or with --apply, fix) projects sitting in the wrong year folder
     Dates { #[arg(long)] apply: bool },
     /// Run the scheduler and web UI (for systemd)
@@ -59,7 +64,11 @@ fn main() -> Result<()> {
         Cmd::Check => println!("{} is valid", path.display()),
         Cmd::Sync { dry_run } => app::run_task(&cfg, "sync", &cli_ctx(dry_run, false), None)?,
         Cmd::Ingest { dry_run } => app::run_task(&cfg, "ingest", &cli_ctx(dry_run, false), None)?,
-        Cmd::Archive { dry_run, limit } => app::run_task(&cfg, "archive", &cli_ctx(dry_run, false), limit)?,
+        Cmd::Archive { dry_run, limit, existing_jpg } => {
+            let ctx = cli_ctx(dry_run, false);
+            *ctx.existing.lock().unwrap() = existing_jpg;
+            app::run_task(&cfg, "archive", &ctx, limit)?
+        }
         Cmd::Dates { apply } => app::run_task(&cfg, "dates", &cli_ctx(false, apply), None)?,
         Cmd::Daemon => {
             let a = app::App::new(cfg);

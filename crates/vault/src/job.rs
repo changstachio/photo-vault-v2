@@ -20,6 +20,8 @@ pub struct Ctx {
     log: Mutex<VecDeque<String>>,
     pub started: Mutex<Instant>,
     pub echo: bool,
+    /// Overrides `archive.existing_jpg` for this run.
+    pub existing: Mutex<Option<crate::config::ExistingJpg>>,
 }
 
 impl Ctx {
@@ -32,6 +34,7 @@ impl Ctx {
             log: Mutex::new(VecDeque::new()),
             started: Mutex::new(Instant::now()),
             echo,
+            existing: Mutex::new(None),
         })
     }
 
