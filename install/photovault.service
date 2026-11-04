@@ -1,0 +1,18 @@
+[Unit]
+Description=PhotoVault daemon (scheduler + web UI)
+Wants=network-online.target
+After=network-online.target remote-fs.target local-fs.target
+
+[Service]
+Type=simple
+# Set to the user that owns the photo folders and can write to the mounted share.
+User=photovault
+ExecStart=/usr/local/bin/vault --config /etc/photovault/config.toml daemon
+Restart=on-failure
+RestartSec=30
+Nice=5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+
+[Install]
+WantedBy=multi-user.target
