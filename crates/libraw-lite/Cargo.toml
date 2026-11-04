@@ -1,0 +1,12 @@
+[package]
+name = "libraw-lite"
+version = "0.1.0"
+edition = "2021"
+license = "LGPL-2.1-only OR CDDL-1.0"
+description = "Minimal LibRaw bindings (vendored LibRaw, no bindgen), builds on MSVC, MinGW, macOS, Linux"
+build = "build.rs"
+
+[dependencies]
+
+[build-dependencies]
+cc = "1"

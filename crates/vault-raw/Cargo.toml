@@ -1,0 +1,14 @@
+[package]
+name = "vault-raw"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+anyhow = "1"
+blake3 = "1"
+jpeg-decoder = { version = "0.3", default-features = false }
+jpeg-encoder = { version = "0.7", features = ["simd"] }
+kamadak-exif = "0.6"
+serde = { version = "1", features = ["derive"] }
+libraw-lite = { path = "../libraw-lite" }
