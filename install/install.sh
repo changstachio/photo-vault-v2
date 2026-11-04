@@ -7,8 +7,15 @@ mkdir -p /etc/photovault
 [ -e /etc/photovault/config.toml ] || /usr/local/bin/vault init /etc/photovault/config.toml
 id photovault >/dev/null 2>&1 || useradd --system --create-home --shell /usr/sbin/nologin photovault
 # The web UI saves settings by writing this file, so the service user owns it.
-chown photovault: /etc/photovault /etc/photovault/config.toml
-install -m 0644 install/photovault.service /etc/systemd/system/photovault.service
+[ -e /etc/systemd/system/photovault.service ] || chown photovault: /etc/photovault /etc/photovault/config.toml
+# Keep a User= you set earlier; reinstalling must not reset it.
+UNIT=/etc/systemd/system/photovault.service
+OLD_USER=$(sed -n 's/^User=//p' "$UNIT" 2>/dev/null | head -n1 || true)
+install -m 0644 install/photovault.service "$UNIT"
+if [ -n "$OLD_USER" ]; then
+  sed -i "s/^User=.*/User=$OLD_USER/" "$UNIT"
+  chown "$OLD_USER": /etc/photovault /etc/photovault/config.toml
+fi
 systemctl daemon-reload
 echo "Edit /etc/photovault/config.toml and set User= in the unit if needed, then:"
 echo "  vault --config /etc/photovault/config.toml check"
